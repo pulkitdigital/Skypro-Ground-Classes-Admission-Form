@@ -1,7 +1,6 @@
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
 const PDFDocument = require("pdfkit");
 const { PDFDocument: PDFLib } = require("pdf-lib");
 const { formatDate, formatDateTime, phone } = require("./formatting");
@@ -354,17 +353,15 @@ function layout(doc, form, files, attachments, { audience, attachmentPageCount }
   }
 
   branding();
+  doc.rect(PAGE_WIDTH / 2 - 120, y, 240, 18).fill(COLOR.gold);
+  write(admin ? "ADMIN COPY" : "STUDENT COPY", PAGE_WIDTH / 2 - 120, y + 4, { font: FONT.bold, size: 10, color: COLOR.navy, width: 240, align: "center" });
+  y += 26;
   write("GROUND SCHOOL ADMISSION FORM", LEFT, y, { font: FONT.bold, size: 19, color: COLOR.navy, width: WIDTH, align: "center" });
   y += 26;
   rule(PAGE_WIDTH / 2 - 110, PAGE_WIDTH / 2 + 110, y, COLOR.gold, 2.5);
   y += 8;
   write(["SkyPro Aviation", formatDateTime(form.submittedAt) && `Submitted ${formatDateTime(form.submittedAt)}`].filter(Boolean).join("  |  "), LEFT, y, { size: 9, color: COLOR.muted, width: WIDTH, align: "center" });
   y += 16;
-  if (admin) {
-    doc.rect(PAGE_WIDTH / 2 - 120, y, 240, 15).fill(COLOR.gold);
-    write("ADMIN COPY - CONTAINS INTERNAL INFORMATION", PAGE_WIDTH / 2 - 120, y + 4, { font: FONT.bold, size: 7.5, color: COLOR.navy, width: 240, align: "center" });
-    y += 21;
-  }
   y += 8;
 
   for (const section of buildSections(form, { audience })) {
@@ -402,7 +399,8 @@ function layout(doc, form, files, attachments, { audience, attachmentPageCount }
   }
 }
 
-async function generatePDF(formData, uploadedFiles = [], outputDirectory, { audience = "student" } = {}) {
+async function generatePDF(formData, uploadedFiles = [], outputDirectory, options = {}) {
+  const audience = options.copyType ?? options.audience ?? "student";
   if (!["admin", "student"].includes(audience)) throw new Error(`Unknown PDF audience: ${audience}`);
   const files = Array.isArray(uploadedFiles) ? uploadedFiles : [];
   const directory = outputDirectory || path.join(__dirname, "../uploads");
@@ -414,9 +412,15 @@ async function generatePDF(formData, uploadedFiles = [], outputDirectory, { audi
   if (bundle.getPageCount()) (await output.copyPages(bundle, bundle.getPageIndices())).forEach(page => output.addPage(page));
 
   // Written once at the end, so a failed render never leaves a partial PDF.
-  const pdfPath = path.join(directory, `admission-${randomUUID()}.pdf`);
+  const pdfPath = path.join(directory, admissionPdfName(formData.fullName, audience));
   await fsp.writeFile(pdfPath, await output.save());
   return pdfPath;
 }
 
-module.exports = Object.assign(generatePDF, { buildSections, officeFields, pdfText, DECLARATION_PARAGRAPHS, APPENDED_UPLOADS, EMBEDDED_UPLOADS });
+function admissionPdfName(name, copyType) {
+  if (!["admin", "student"].includes(copyType)) throw new Error("Invalid PDF copy type");
+  const safeName = String(name || "").normalize("NFKD").replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || "Student";
+  return `SkyPro_GroundSchool_${safeName}_${copyType === "admin" ? "Admin" : "Student"}_Copy.pdf`;
+}
+
+module.exports = Object.assign(generatePDF, { admissionPdfName, buildSections, officeFields, pdfText, DECLARATION_PARAGRAPHS, APPENDED_UPLOADS, EMBEDDED_UPLOADS });

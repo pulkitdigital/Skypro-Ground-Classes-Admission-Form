@@ -107,7 +107,7 @@ Rejected validation, upload parsing, reCAPTCHA, ID allocation, or queue insertio
 
 Success preserves `{ success: true, message, jobId, info }`. Rejections return `{ error, fields? }` with HTTP 400; ID allocation unavailability returns 503; other server failures return 500. The Application ID is absent from all response payloads.
 
-The queue is still in memory. A process crash can lose queued work and leave temporary files; no unsafe startup purge or durable queue was added. The admin PDF uses the Ground School layout (Phase 11: structured sections, Office Use, ordered document attachments). Sheets rows use the Ground School schema (Phase 13) in the `Ground School Admissions` tab, with the internal Application ID as plain text in column B; see the README for the header row. The dedicated ID ledger has its own explicit headers.
+The queue is still in memory. A process crash can lose queued work and leave temporary files; no unsafe startup purge or durable queue was added. Both PDFs are generated before emails are sent. ADMIN_EMAIL receives only the Admin Copy; the applicant receives only the Student Copy, which excludes the internal ID and office section. Both files use sanitized filenames and are removed with the job directory after success or exhausted retries. The admin PDF uses the Ground School layout (Phase 11: structured sections, Office Use, ordered document attachments). Sheets rows use the Ground School schema (Phase 13) in the `Ground School Admissions` tab, with the internal Application ID as plain text in column B; see the README for the header row. The dedicated ID ledger has its own explicit headers.
 
 ## Verification
 

@@ -9,14 +9,17 @@ function createQueue({ generatePDF, sendAdminEmail, appendAdmissionRow, cleanup 
 
   async function processJob(job) {
     const { formData, uploadedFiles, uploadDir } = job.data;
-    if (!job.pdfPath || !fs.existsSync(job.pdfPath)) {
-      job.pdfPath = await generatePDF(formData, uploadedFiles, uploadDir, { audience: "admin" });
-      if (!job.pdfPath || !fs.existsSync(job.pdfPath)) throw new Error("PDF generation failed - file not created");
+    for (const copyType of ["admin", "student"]) {
+      const key = `${copyType}PdfPath`;
+      if (!job[key] || !fs.existsSync(job[key])) {
+        job[key] = await generatePDF(formData, uploadedFiles, uploadDir, { copyType });
+        if (!job[key] || !fs.existsSync(job[key])) throw new Error(`${copyType} PDF generation failed - file not created`);
+      }
     }
     // Retain completed stages during retries (an ambiguous external timeout may
     // still duplicate delivery; durable idempotency is outside this memory queue).
     if (!job.emailSent) {
-      await sendAdminEmail({ formData, pdfPath: job.pdfPath, delivered: (job.emailDelivered ||= {}) });
+      await sendAdminEmail({ formData, adminPdfPath: job.adminPdfPath, studentPdfPath: job.studentPdfPath, delivered: (job.emailDelivered ||= {}) });
       job.emailSent = true;
     }
     if (!job.sheetWritten) {

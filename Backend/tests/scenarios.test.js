@@ -70,7 +70,7 @@ function accept(form, options = {}) {
   data.applicationId = ID;
   const cells = admissionRow(data, sent.uploads);
   const row = Object.fromEntries(ADMISSION_HEADERS.map((header, index) => [header, cells[index]]));
-  const student = email.buildStudentEmail(data, { from: "sender@example.com", contactEmail: "info@skyproaviation.org" });
+  const student = email.buildStudentEmail(data, { from: "sender@example.com", contactEmail: "info@skyproaviation.org", pdfName: generatePDF.admissionPdfName(data.fullName, "student"), pdfContent: "cGRm" });
   email.assertStudentSafe(student, data);
   assert.equal(JSON.stringify(student).includes(ID), false);
   assert.equal(JSON.stringify(generatePDF.buildSections(data)).includes(ID), false);

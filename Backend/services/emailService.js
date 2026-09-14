@@ -1,6 +1,8 @@
 // Backend/services/emailService.js
 require("dotenv").config();
 const fs = require("node:fs/promises");
+const path = require("node:path");
+const { admissionPdfName } = require("./pdfGenerator");
 const brevo = require("@getbrevo/brevo");
 const { formatDateTime, phone } = require("./formatting");
 
@@ -118,8 +120,8 @@ function buildAdminEmail(form, { from, to, pdfName, pdfContent }) {
 }
 
 // Applicant confirmation. Built only from applicant-facing fields and never
-// carries an attachment, internal ID, or office-use content.
-function buildStudentEmail(form, { from, contactEmail }) {
+// carries only the separately generated student PDF, never internal office data.
+function buildStudentEmail(form, { from, contactEmail, pdfName, pdfContent }) {
   const rows = [
     ["Course", courseOf(form)],
     ["Subjects", subjectsOf(form)],
@@ -131,6 +133,7 @@ function buildStudentEmail(form, { from, contactEmail }) {
     sender: { name: FROM_NAME, email: from },
     to: [{ email: form.email, name: form.fullName }],
     subject: "Admission Application Received – SkyPro Aviation",
+    attachment: [{ name: pdfName, content: pdfContent }],
     htmlContent: `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="text-align: center; margin-bottom: 30px;">
@@ -190,7 +193,10 @@ function assertStudentSafe(message, form) {
   const serialized = JSON.stringify(message);
   const internal = [form.applicationId, "Application ID", "Office Use", "Admission No", "Verified By", "Remarks"].filter(Boolean);
   const leaked = internal.find(value => serialized.includes(value));
-  if (leaked || message.attachment) throw new Error("Student confirmation contains internal content; not sent");
+  if (leaked) throw new Error("Student confirmation contains internal content; not sent");
+  if (message.attachment?.length !== 1 || message.attachment[0].name !== admissionPdfName(form.fullName, "student") || !message.attachment[0].content) {
+    throw new Error("Student confirmation requires the Student Copy PDF; not sent");
+  }
 }
 
 /* ==========================
@@ -199,24 +205,30 @@ function assertStudentSafe(message, form) {
 
 // `delivered` is owned by the queue job, so a job retry resends only the
 // message that has not been delivered yet.
-async function sendAdminEmail({ formData, pdfPath, delivered = {}, retryDelay = attempt => attempt * 3000 }) {
+async function sendAdminEmail({ formData, adminPdfPath, studentPdfPath, delivered = {}, retryDelay = attempt => attempt * 3000 }) {
   const FROM_EMAIL = process.env.MAIL_FROM;
   const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
   if (!FROM_EMAIL || !ADMIN_EMAIL) {
     throw new Error("❌ MAIL_FROM or ADMIN_EMAIL missing in .env");
   }
-  if (!pdfPath) throw new Error("Admin admission PDF is missing");
+  if (!adminPdfPath || !studentPdfPath) throw new Error("Both Admin and Student Copy PDFs are required");
+  if (path.resolve(adminPdfPath) === path.resolve(studentPdfPath)) throw new Error("Admin and Student Copy PDFs must be separate files");
+  if (path.basename(adminPdfPath) !== admissionPdfName(formData.fullName, "admin") || path.basename(studentPdfPath) !== admissionPdfName(formData.fullName, "student")) {
+    throw new Error("PDF copy paths do not match their intended recipients");
+  }
+  const adminBytes = await fs.readFile(adminPdfPath);
+  const studentBytes = await fs.readFile(studentPdfPath);
+  if (adminBytes.equals(studentBytes)) throw new Error("Admin and Student Copy PDFs must have different content");
 
-  const safeName = (formData.fullName || "Student").trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9-]/g, "");
-  const safeId = (formData.applicationId || "").replace(/[^A-Z0-9-]/g, "");
   const admin = buildAdminEmail(formData, {
     from: FROM_EMAIL,
     to: ADMIN_EMAIL,
-    pdfName: `${safeId ? `${safeId}-` : ""}${safeName}-Admission-Form.pdf`,
-    pdfContent: (await fs.readFile(pdfPath)).toString("base64"),
+    pdfName: admissionPdfName(formData.fullName, "admin"),
+    pdfContent: adminBytes.toString("base64"),
   });
-  const student = buildStudentEmail(formData, { from: FROM_EMAIL, contactEmail: ADMIN_EMAIL });
+  const student = buildStudentEmail(formData, { from: FROM_EMAIL, contactEmail: ADMIN_EMAIL,
+    pdfName: admissionPdfName(formData.fullName, "student"), pdfContent: studentBytes.toString("base64") });
   assertStudentSafe(student, formData);
 
   await verifyConnection();

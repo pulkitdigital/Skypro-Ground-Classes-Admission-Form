@@ -29,7 +29,7 @@ async function render(t, scenario, audience, alter = async () => {}) {
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const { form, files } = await sampleAdmission(scenario, directory);
   await alter(files, form);
-  const bytes = await fs.readFile(await generatePDF(form, files, directory, { audience }));
+  const bytes = await fs.readFile(await generatePDF(form, files, directory, { copyType: audience }));
   const widths = (await PDFDocument.load(bytes)).getPages().map(page => Math.round(page.getWidth()));
   const formPages = widths.filter(width => width === A4_WIDTH).length;
   assert.ok(formPages >= 2, "the form itself is rendered");
@@ -41,7 +41,7 @@ const pagesFor = fields => fields.flatMap(field => Array(SAMPLE_DOCUMENTS[field]
 test("admin PDF includes internal information, office use and ordered attachments without photo/signature pages", async t => {
   const { form, text, attachments, totalPages } = await render(t, "indian-package", "admin");
   assert.deepEqual(attachments, pagesFor(["aadhar", "marksheet10", "marksheet12"]));
-  for (const expected of ["GROUND SCHOOL ADMISSION FORM", "INTERNAL APPLICATION INFORMATION", form.applicationId, "STUDENT DETAILS", "DGCA INFORMATION", "EDUCATIONAL QUALIFICATION", "PARENT DETAILS", "EMERGENCY CONTACT", "COURSE & ENROLLMENT", "DECLARATION & UNDERTAKING", "SUBMITTED DOCUMENTS", "FOR OFFICE USE ONLY", "Aarav Sharma", "+91 9876543210", "Offline", "Complete Ground School Package", `of ${totalPages}`]) {
+  for (const expected of ["ADMIN COPY", "GROUND SCHOOL ADMISSION FORM", "INTERNAL APPLICATION INFORMATION", form.applicationId, "STUDENT DETAILS", "DGCA INFORMATION", "EDUCATIONAL QUALIFICATION", "PARENT DETAILS", "EMERGENCY CONTACT", "COURSE & ENROLLMENT", "DECLARATION & UNDERTAKING", "SUBMITTED DOCUMENTS", "FOR OFFICE USE ONLY", "Aarav Sharma", "+91 9876543210", "Offline", "Complete Ground School Package", `of ${totalPages}`]) {
     assert.ok(text.includes(expected), `missing ${expected}`);
   }
   assert.equal(text.includes("JAIPUR LOCAL CONTACT"), false, "Jaipur contact is omitted when not supplied");
@@ -50,8 +50,9 @@ test("admin PDF includes internal information, office use and ordered attachment
 test("student audience never renders the Application ID or office section", async t => {
   const { form, text, attachments } = await render(t, "indian-package", "student");
   assert.ok(text.includes("Aarav Sharma"));
+  assert.ok(text.includes("STUDENT COPY"));
   assert.equal(attachments.length, 4);
-  for (const hidden of [form.applicationId, "SKY-GS", "OFFICE USE", "INTERNAL APPLICATION", "ADMIN"]) assert.equal(text.includes(hidden), false, `leaked ${hidden}`);
+  for (const hidden of [form.applicationId, "SKY-GS", "OFFICE USE", "INTERNAL APPLICATION", "ADMIN COPY", "Admission No.", "Verified By", "Remarks"]) assert.equal(text.includes(hidden), false, `leaked ${hidden}`);
 });
 
 test("foreign DGCA applicant renders conditional details and passport, marksheets, DGCA result and medical in order", async t => {
@@ -87,4 +88,28 @@ test("office fields auto-populate ID, class mode and enrollment and leave admini
   assert.deepEqual(generatePDF.buildSections(form).map(section => section.id), ["student", "dgca", "education", "parents", "jaipur", "emergency", "course", "declaration", "documents"]);
   assert.equal(generatePDF.buildSections(form, { audience: "admin" })[0].id, "internal");
   assert.equal(generatePDF.pdfText("Zo\u00eb \u0106wik \u0926\u0947\u0935 "), "Zo\u00eb Cwik ??? ");
+});
+
+
+test("both copies share all applicant sections and sanitize filenames", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "skypro-copy-test-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const { form, files } = await sampleAdmission("foreign-individual-dgca", directory);
+  const adminSections = generatePDF.buildSections(form, { audience: "admin" }).filter(section => section.id !== "internal");
+  assert.deepEqual(adminSections, generatePDF.buildSections(form, { audience: "student" }));
+  const texts = [];
+  for (const copyType of ["admin", "student"]) {
+    const target = await generatePDF(form, files, directory, { copyType });
+    assert.equal(path.basename(target), generatePDF.admissionPdfName(form.fullName, copyType));
+    texts.push(extractText(await fs.readFile(target)));
+  }
+  for (const section of adminSections) {
+    for (const row of section.rows || []) {
+      const value = generatePDF.pdfText(row.value);
+      if (value && !value.includes("\n")) {
+        for (const text of texts) assert.ok(text.replace(/\s/g, "").includes(value.replace(/\s/g, "")), `missing shared value: ${value}`);
+      }
+    }
+  }
+  assert.equal(generatePDF.admissionPdfName("../../<>:", "student"), "SkyPro_GroundSchool_Student_Student_Copy.pdf");
 });
