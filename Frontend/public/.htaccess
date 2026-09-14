@@ -1,0 +1,10 @@
+# Vite copies everything in public/ into dist/, so this file ships with every build.
+# It only takes effect when the frontend is served by Apache; other hosts ignore it.
+<IfModule mod_rewrite.c>
+RewriteEngine On
+
+# Remove Google Analytics / tracking parameters from URL
+RewriteCond %{HTTP_HOST} ^groundschool\.skyproaviation\.org$ [NC]
+RewriteCond %{QUERY_STRING} (^|&)(_gl|_ga|_ga_[^&]*)=[^&]*(&|$)
+RewriteRule ^(.*)$ /$1? [R=301,L]
+</IfModule>

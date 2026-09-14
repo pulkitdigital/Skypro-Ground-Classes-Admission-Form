@@ -1,0 +1,30 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test --test-isolation=none tests/*.test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@getbrevo/brevo": "^3.0.1",
+    "@sendinblue/client": "^3.3.1",
+    "axios": "^1.20.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "googleapis": "^170.1.0",
+    "image-size": "^2.0.2",
+    "libphonenumber-js": "^1.13.13",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.12",
+    "pdf-lib": "^1.17.1",
+    "pdfkit": "^0.17.2",
+    "puppeteer": "^24.35.0",
+    "sharp": "^0.34.5"
+  }
+}
