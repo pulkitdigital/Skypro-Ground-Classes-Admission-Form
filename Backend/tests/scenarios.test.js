@@ -3,7 +3,11 @@
 // email builders. No network, Google, or Brevo access is used.
 const { test, before } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
 const path = require("node:path");
+const { PDFDocument } = require("pdf-lib");
+const { SAMPLE_DOCUMENTS, extractText, sampleDocument } = require("./pdfFixtures");
 const { pathToFileURL } = require("node:url");
 const { normalizeAdmission } = require("../services/admissionContract");
 const { validateFileMetadata } = require("../services/uploadService");
@@ -74,8 +78,10 @@ function accept(form, options = {}) {
   email.assertStudentSafe(student, data);
   assert.equal(JSON.stringify(student).includes(ID), false);
   assert.equal(JSON.stringify(generatePDF.buildSections(data)).includes(ID), false);
-  const admin = email.buildAdminEmail(data, { from: "sender@example.com", to: "info@skyproaviation.org", pdfName: `${ID}.pdf`, pdfContent: "" });
+  const adminAttachments = ["form", "documents"].map(part => ({ name: generatePDF.admissionPdfName(data.fullName, "admin", part), content: "cGRm" }));
+  const admin = email.buildAdminEmail(data, { from: "sender@example.com", to: "info@skyproaviation.org", formPdf: adminAttachments[0], documentsPdf: adminAttachments[1] });
   assert.ok(admin.subject.includes(ID) && admin.htmlContent.includes(ID) && admin.textContent.includes(ID));
+  assert.deepEqual(admin.attachment.map(file => file.name), ["SkyPro_GroundSchool_Aarav_Sharma_Admin_Form.pdf", "SkyPro_GroundSchool_Aarav_Sharma_Admin_Documents.pdf"]);
   assert.equal(generatePDF.buildSections(data, { audience: "admin" })[0].rows[0].value, ID);
   assert.equal(generatePDF.officeFields(data)[0].value, ID);
   assert.equal(row["SkyPro Application ID"], ID);
@@ -219,6 +225,51 @@ test("32-33 missing conditional fields/uploads and an unchecked declaration are 
   assert.ok(frontendErrors(ui.sanitizeEnrollment({ ...change(baseForm(), "courseSelection", "Individual Subject(s)"), individualSubjects: [] })).individualSubjects);
   rejects(submit(fill(baseForm(), { highestQualification: "Other" })), "otherQualification");
   rejects(submit(baseForm(), { declaration: false }), "declarationAccepted");
+});
+
+// Writes a sample PDF for every submitted document upload and builds the admin Documents PDF.
+async function documentsPdf(t, result) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "skypro-scenario-documents-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const files = [];
+  for (const upload of result.uploads.filter(file => SAMPLE_DOCUMENTS[file.fieldname])) {
+    const target = path.join(directory, `${upload.fieldname}.pdf`);
+    await fs.writeFile(target, await sampleDocument(upload.fieldname));
+    files.push({ ...upload, path: target });
+  }
+  const bytes = await fs.readFile(await generatePDF(result.data, files, directory, { copyType: "admin", part: "documents" }));
+  return { text: extractText(bytes), widths: (await PDFDocument.load(bytes)).getPages().map(page => Math.round(page.getWidth())) };
+}
+
+test("44 admin Documents PDF follows nationality, DGCA result and medical branches in the fixed order", async t => {
+  const LABELS = Object.fromEntries(generatePDF.APPENDED_UPLOADS);
+  const withNumber = fill(baseForm(), { hasDgcaComputerNumber: "Yes", dgcaComputerNumber: "DGCA-778812", dgcaPapersCleared: "Yes" });
+  const cleared = change(ui.sanitizeAviationForm({ ...withNumber, dgcaSubjects: ["Air Navigation"] }), "dgcaExamResultDate", "2026-06-10");
+  const medical = form => fill(form, { hasEgcaId: "Yes", egcaId: "EGCA-1", hasDgcaMedical: "Yes", dgcaMedicalClass: "DGCA Class-2 Medical" });
+  const foreign = form => fill(form, { nationality: "Foreign National", countryOfCitizenship: "Singapore", passportNumber: "K1234567A", passportExpiryDate: "2031-05-20" });
+  const cases = [
+    [baseForm(), ["aadhar", "marksheet10", "marksheet12"]],
+    [foreign(baseForm()), ["passport", "marksheet10", "marksheet12"]],
+    [cleared, ["aadhar", "marksheet10", "marksheet12", "dgcaExamResult"]],
+    [medical(baseForm()), ["aadhar", "marksheet10", "marksheet12", "dgcaMedicalAssessment"]],
+    [medical(foreign(cleared)), ["passport", "marksheet10", "marksheet12", "dgcaExamResult", "dgcaMedicalAssessment"]],
+  ];
+  for (const [form, fields] of cases) {
+    const { text, widths } = await documentsPdf(t, accept(form));
+    const expected = fields.flatMap(field => Array(SAMPLE_DOCUMENTS[field].pages).fill(SAMPLE_DOCUMENTS[field].width));
+    assert.deepEqual(widths, [595, ...expected], `documents for ${fields.join(", ")}`);
+    for (const expectedText of ["SUPPORTING DOCUMENTS", "Aarav Sharma", ID, "14 Sep 2026, 12:00 IST"]) assert.ok(text.includes(expectedText), `cover missing ${expectedText}`);
+    let page = 2;
+    for (const field of fields) {
+      const { pages } = SAMPLE_DOCUMENTS[field];
+      assert.ok(text.includes(LABELS[field]), `cover lists ${field}`);
+      assert.ok(text.includes(pages === 1 ? `In Documents PDF - page ${page}` : `In Documents PDF - pages ${page}-${page + pages - 1}`), `${field} range`);
+      page += pages;
+    }
+    for (const [field, label] of generatePDF.APPENDED_UPLOADS) {
+      if (!fields.includes(field)) assert.equal(text.includes(label), false, `${label} is not applicable`);
+    }
+  }
 });
 
 test("43 a form with every branch filled then switched off submits exactly the minimal field set", () => {

@@ -16,11 +16,14 @@ async function run() {
       const scenarioDirectory = path.join(workDirectory, name);
       await fs.mkdir(scenarioDirectory);
       const { form, files } = await sampleAdmission(name, scenarioDirectory);
-      for (const audience of ["admin", "student"]) {
-        const target = path.join(outputDirectory, `${name}-${audience}.pdf`);
-        await fs.copyFile(await generatePDF(form, files, scenarioDirectory, { audience }), target);
+      // Admin receives a Form PDF and a Documents PDF; the student receives one combined copy.
+      for (const [label, options] of [["admin-form", { copyType: "admin", part: "form" }], ["admin-documents", { copyType: "admin", part: "documents" }], ["student", { copyType: "student" }]]) {
+        const source = await generatePDF(form, files, scenarioDirectory, options);
+        if (!source) { console.log(`${label.padEnd(15)} ${name}: not generated (no document could be appended)`); continue; }
+        const target = path.join(outputDirectory, `${name}-${label}.pdf`);
+        await fs.copyFile(source, target);
         const pages = (await PDFDocument.load(await fs.readFile(target))).getPageCount();
-        console.log(`${audience.padEnd(7)} ${name}: ${pages} pages -> ${path.relative(__dirname, target)}`);
+        console.log(`${label.padEnd(15)} ${name}: ${pages} pages -> ${path.relative(__dirname, target)}`);
       }
     }
   } finally {

@@ -154,6 +154,8 @@ function officeFields(form) {
   ];
 }
 
+// Merges the applicable supporting documents, unmodified, in APPENDED_UPLOADS order.
+// Each result's `offset` is its 0-based position within the merged bundle.
 async function prepareAttachments(form, files) {
   const bundle = await PDFLib.create();
   const results = [];
@@ -176,22 +178,48 @@ async function prepareAttachments(form, files) {
   return { bundle, results };
 }
 
-function renderForm(form, files, attachments, { audience, attachmentPageCount }) {
+// The admin Documents PDF starts with a one-page cover/index before the documents.
+const DOCUMENTS_COVER_PAGES = 1;
+const IN_DOCUMENTS_PDF = "In Documents PDF";
+
+// Shared status text for the form's Submitted Documents section and the documents cover.
+function documentStatus(result, prefix, pagesBefore) {
+  if (result.status === "failed") return "Uploaded, but could not be appended - request the original from the student";
+  if (result.status !== "appended") return "Not provided";
+  const start = pagesBefore + result.offset + 1;
+  return result.pageCount === 1 ? `${prefix} - page ${start}` : `${prefix} - pages ${start}-${start + result.pageCount - 1}`;
+}
+
+// Cover page plus the merged documents. `pdf` is null when no document could be appended.
+async function buildDocumentsPdf(form, files) {
+  const { bundle, results } = await prepareAttachments(form, files);
+  if (!bundle.getPageCount()) return { pdf: null, results };
+  const totalPages = DOCUMENTS_COVER_PAGES + bundle.getPageCount();
+  const pdf = await PDFLib.load(await renderPdf("SkyPro Ground School Supporting Documents", doc => documentsCover(doc, form, results, totalPages)));
+  if (pdf.getPageCount() !== DOCUMENTS_COVER_PAGES) throw new Error("Supporting documents cover did not fit on one page");
+  (await pdf.copyPages(bundle, bundle.getPageIndices())).forEach(page => pdf.addPage(page));
+  return { pdf, results };
+}
+
+function renderPdf(title, draw) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 0, bufferPages: true, info: { Title: "SkyPro Ground School Admission Form", Author: "SkyPro Aviation" } });
+    const doc = new PDFDocument({ size: "A4", margin: 0, bufferPages: true, info: { Title: title, Author: "SkyPro Aviation" } });
     const chunks = [];
     doc.on("data", chunk => chunks.push(chunk));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
     try {
-      layout(doc, form, files, attachments, { audience, attachmentPageCount });
+      draw(doc);
       doc.end();
     } catch (error) { reject(error); }
   });
 }
 
-function layout(doc, form, files, attachments, { audience, attachmentPageCount }) {
-  const admin = audience === "admin";
+const renderForm = (form, files, attachments, options) =>
+  renderPdf("SkyPro Ground School Admission Form", doc => layout(doc, form, files, attachments, options));
+
+// Page furniture and drawing primitives shared by the form and the documents cover.
+function pageKit(doc) {
   const openAsset = file => { try { return fs.existsSync(file) ? doc.openImage(file) : null; } catch { return null; } };
   const header = openAsset(HEADER_PATH);
   const footer = openAsset(FOOTER_PATH);
@@ -199,22 +227,80 @@ function layout(doc, form, files, attachments, { audience, attachmentPageCount }
   const footerHeight = footer ? PAGE_WIDTH * footer.height / footer.width : 0;
   const top = headerHeight + 22;
   const bottom = PAGE_HEIGHT - footerHeight - 30;
+  const branding = () => {
+    if (header) doc.image(header, 0, 0, { width: PAGE_WIDTH, height: headerHeight });
+    if (footer) doc.image(footer, 0, PAGE_HEIGHT - footerHeight, { width: PAGE_WIDTH, height: footerHeight });
+  };
+  const measure = (text, font, size, width) => doc.font(font).fontSize(size).heightOfString(pdfText(text), { width, lineGap: 1.5 });
+  const write = (text, x, atY, { font = FONT.regular, size = 9.5, color = COLOR.text, width, align = "left" } = {}) =>
+    doc.font(font).fontSize(size).fillColor(color).text(pdfText(text), x, atY, { width, align, lineGap: 1.5 });
+  const rule = (x1, x2, atY, color = COLOR.line, lineWidth = 0.5) => doc.moveTo(x1, atY).lineTo(x2, atY).lineWidth(lineWidth).strokeColor(color).stroke();
+  const rowHeight = (label, sample, width) => Math.max(measure(label, FONT.bold, 9, LABEL_WIDTH - 16), measure(sample, FONT.regular, 9.5, width - LABEL_WIDTH - 10)) + 10;
+  // Draws a shaded label/value row; a non-string value is left for the caller to fill.
+  const labelRow = (label, value, atY, index, width, height) => {
+    if (index % 2 === 0) doc.rect(LEFT, atY, width, height).fill(COLOR.shade);
+    rule(LEFT, LEFT + width, atY + height);
+    write(label, LEFT + 8, atY + 5, { font: FONT.bold, size: 9, color: COLOR.navy, width: LABEL_WIDTH - 16 });
+    if (typeof value === "string") write(value, LEFT + LABEL_WIDTH, atY + 5, { width: width - LABEL_WIDTH - 10 });
+  };
+  const copyBadge = (label, atY) => {
+    doc.rect(PAGE_WIDTH / 2 - 120, atY, 240, 18).fill(COLOR.gold);
+    write(label, PAGE_WIDTH / 2 - 120, atY + 4, { font: FONT.bold, size: 10, color: COLOR.navy, width: 240, align: "center" });
+  };
+  const pageFooter = (label, index, totalPages) => {
+    write(label, LEFT, bottom + 10, { size: 7.5, color: COLOR.muted, width: WIDTH / 2 });
+    write(`Page ${index + 1} of ${totalPages}`, LEFT + WIDTH / 2, bottom + 10, { size: 7.5, color: COLOR.muted, width: WIDTH / 2, align: "right" });
+  };
+  return { top, bottom, branding, measure, write, rule, rowHeight, labelRow, copyBadge, pageFooter };
+}
+
+function documentsCover(doc, form, results, totalPages) {
+  const { top, branding, write, rule, rowHeight, labelRow, copyBadge, pageFooter } = pageKit(doc);
+  let y = top;
+  branding();
+  copyBadge("ADMIN COPY", y);
+  y += 26;
+  write("SUPPORTING DOCUMENTS", LEFT, y, { font: FONT.bold, size: 19, color: COLOR.navy, width: WIDTH, align: "center" });
+  y += 26;
+  rule(PAGE_WIDTH / 2 - 110, PAGE_WIDTH / 2 + 110, y, COLOR.gold, 2.5);
+  y += 8;
+  write("SkyPro Aviation  |  Ground School Admission", LEFT, y, { size: 9, color: COLOR.muted, width: WIDTH, align: "center" });
+  y += 30;
+
+  const table = (title, list) => {
+    doc.rect(LEFT, y, WIDTH, 22).fill(COLOR.navy);
+    write(title, LEFT + 10, y + 6.5, { font: FONT.bold, size: 10.5, color: "#ffffff", width: WIDTH - 20 });
+    y += 26;
+    list.forEach(([label, value], index) => {
+      const height = rowHeight(label, value, WIDTH);
+      labelRow(label, value, y, index, WIDTH, height);
+      y += height;
+    });
+    y += 14;
+  };
+  table("APPLICATION", [
+    ["Student Full Name", form.fullName || "Not provided"],
+    ["SkyPro Application ID", form.applicationId || "Not allocated"],
+    ["Submitted On", formatDateTime(form.submittedAt) || "Not provided"],
+  ]);
+  table("DOCUMENT INDEX", results.map(result => [result.label, documentStatus(result, IN_DOCUMENTS_PDF, DOCUMENTS_COVER_PAGES)]));
+  write("Page numbers refer to this PDF. Documents follow this page as uploaded, in the order listed.", LEFT, y, { font: FONT.italic, size: 8, color: COLOR.muted, width: WIDTH });
+  pageFooter(form.applicationId ? `Supporting Documents  |  ${form.applicationId}` : "Supporting Documents", 0, totalPages);
+}
+
+// The student form is followed by its appended documents (`appendedPageCount`); the admin
+// form stands alone and points to page ranges in the separate Documents PDF.
+function layout(doc, form, files, attachments, { audience, appendedPageCount }) {
+  const admin = audience === "admin";
+  const { top, bottom, branding, measure, write, rule, rowHeight, labelRow, copyBadge, pageFooter } = pageKit(doc);
   let y = top;
   let page = 0;
   let sectionNumber = 0;
   let reserve = null;
   const deferred = [];
 
-  const branding = () => {
-    if (header) doc.image(header, 0, 0, { width: PAGE_WIDTH, height: headerHeight });
-    if (footer) doc.image(footer, 0, PAGE_HEIGHT - footerHeight, { width: PAGE_WIDTH, height: footerHeight });
-  };
   const newPage = () => { doc.addPage({ size: "A4", margin: 0 }); page++; branding(); y = top; };
   const ensure = height => { if (y + height > bottom) newPage(); };
-  const measure = (text, font, size, width) => doc.font(font).fontSize(size).heightOfString(pdfText(text), { width, lineGap: 1.5 });
-  const write = (text, x, atY, { font = FONT.regular, size = 9.5, color = COLOR.text, width, align = "left" } = {}) =>
-    doc.font(font).fontSize(size).fillColor(color).text(pdfText(text), x, atY, { width, align, lineGap: 1.5 });
-  const rule = (x1, x2, atY, color = COLOR.line, lineWidth = 0.5) => doc.moveTo(x1, atY).lineTo(x2, atY).lineWidth(lineWidth).strokeColor(color).stroke();
 
   function imageBox(field, x, atY, width, height, placeholder) {
     doc.rect(x, atY, width, height).lineWidth(1).strokeColor(COLOR.navy).stroke();
@@ -241,18 +327,14 @@ function layout(doc, form, files, attachments, { audience, attachmentPageCount }
     const sample = typeof value === "function" ? "Appended - pages 999-999" : value;
     const size = () => {
       const width = reserve && reserve.page === page && y < reserve.bottom ? WIDTH - reserve.width : WIDTH;
-      const valueWidth = width - LABEL_WIDTH - 10;
-      return { width, valueWidth, height: Math.max(measure(label, FONT.bold, 9, LABEL_WIDTH - 16), measure(sample, FONT.regular, 9.5, valueWidth)) + 10 };
+      return { width, height: rowHeight(label, sample, width) };
     };
     let box = size();
     const before = page;
     ensure(box.height);
     if (page !== before) box = size();
-    if (index % 2 === 0) doc.rect(LEFT, y, box.width, box.height).fill(COLOR.shade);
-    rule(LEFT, LEFT + box.width, y + box.height);
-    write(label, LEFT + 8, y + 5, { font: FONT.bold, size: 9, color: COLOR.navy, width: LABEL_WIDTH - 16 });
-    if (typeof value === "function") deferred.push({ page, x: LEFT + LABEL_WIDTH, y: y + 5, width: box.valueWidth, value });
-    else write(value, LEFT + LABEL_WIDTH, y + 5, { width: box.valueWidth });
+    labelRow(label, value, y, index, box.width, box.height);
+    if (typeof value === "function") deferred.push({ page, x: LEFT + LABEL_WIDTH, y: y + 5, width: box.width - LABEL_WIDTH - 10, value });
     y += box.height;
   }
 
@@ -297,12 +379,10 @@ function layout(doc, form, files, attachments, { audience, attachmentPageCount }
       list.push({ label, value: files.some(file => file.fieldname === field) ? "Embedded in this form" : "Not provided" });
     }
     for (const result of attachments) {
-      const value = result.status === "appended"
-        ? mainPages => {
-          const start = mainPages + result.offset + 1;
-          return result.pageCount === 1 ? `Appended - page ${start}` : `Appended - pages ${start}-${start + result.pageCount - 1}`;
-        }
-        : result.status === "failed" ? "Uploaded, but could not be appended - request the original from the student" : "Not provided";
+      // Appended student pages are numbered once the form's own page count is known.
+      const value = result.status === "appended" && !admin
+        ? mainPages => documentStatus(result, "Appended", mainPages)
+        : documentStatus(result, IN_DOCUMENTS_PDF, DOCUMENTS_COVER_PAGES);
       list.push({ label: result.label, value });
     }
     rows(list);
@@ -353,8 +433,7 @@ function layout(doc, form, files, attachments, { audience, attachmentPageCount }
   }
 
   branding();
-  doc.rect(PAGE_WIDTH / 2 - 120, y, 240, 18).fill(COLOR.gold);
-  write(admin ? "ADMIN COPY" : "STUDENT COPY", PAGE_WIDTH / 2 - 120, y + 4, { font: FONT.bold, size: 10, color: COLOR.navy, width: 240, align: "center" });
+  copyBadge(admin ? "ADMIN COPY" : "STUDENT COPY", y);
   y += 26;
   write("GROUND SCHOOL ADMISSION FORM", LEFT, y, { font: FONT.bold, size: 19, color: COLOR.navy, width: WIDTH, align: "center" });
   y += 26;
@@ -390,37 +469,52 @@ function layout(doc, form, files, attachments, { audience, attachmentPageCount }
     doc.switchToPage(cell.page);
     write(cell.value(mainPages), cell.x, cell.y, { width: cell.width });
   }
-  const totalPages = mainPages + attachmentPageCount;
+  const totalPages = mainPages + appendedPageCount;
   const footerLabel = admin && form.applicationId ? `Ground School Admission Form  |  ${form.applicationId}` : "Ground School Admission Form";
   for (let index = 0; index < mainPages; index++) {
     doc.switchToPage(index);
-    write(footerLabel, LEFT, bottom + 10, { size: 7.5, color: COLOR.muted, width: WIDTH / 2 });
-    write(`Page ${index + 1} of ${totalPages}`, LEFT + WIDTH / 2, bottom + 10, { size: 7.5, color: COLOR.muted, width: WIDTH / 2, align: "right" });
+    pageFooter(footerLabel, index, totalPages);
   }
 }
 
+const ADMIN_PARTS = ["form", "documents"];
+
+// Student: one PDF, form followed by the appended documents.
+// Admin: `part: "form"` (form pages only) or `part: "documents"` (cover + documents);
+// the documents part resolves to null when no document could be appended.
 async function generatePDF(formData, uploadedFiles = [], outputDirectory, options = {}) {
   const audience = options.copyType ?? options.audience ?? "student";
   if (!["admin", "student"].includes(audience)) throw new Error(`Unknown PDF audience: ${audience}`);
+  const part = audience === "admin" ? options.part : undefined;
+  if (audience === "admin" && !ADMIN_PARTS.includes(part)) throw new Error(`Unknown admin PDF part: ${part}`);
   const files = Array.isArray(uploadedFiles) ? uploadedFiles : [];
   const directory = outputDirectory || path.join(__dirname, "../uploads");
   await fsp.mkdir(directory, { recursive: true });
 
-  const { bundle, results } = await prepareAttachments(formData, files);
-  const formBytes = await renderForm(formData, files, results, { audience, attachmentPageCount: bundle.getPageCount() });
-  const output = await PDFLib.load(formBytes);
-  if (bundle.getPageCount()) (await output.copyPages(bundle, bundle.getPageIndices())).forEach(page => output.addPage(page));
+  let output;
+  if (part === "documents") {
+    output = (await buildDocumentsPdf(formData, files)).pdf;
+    if (!output) return null;
+  } else {
+    // Page ranges come from the merge, so they are known before the form is rendered.
+    const { bundle, results } = await prepareAttachments(formData, files);
+    const appendedPageCount = audience === "student" ? bundle.getPageCount() : 0;
+    output = await PDFLib.load(await renderForm(formData, files, results, { audience, appendedPageCount }));
+    if (appendedPageCount) (await output.copyPages(bundle, bundle.getPageIndices())).forEach(page => output.addPage(page));
+  }
 
   // Written once at the end, so a failed render never leaves a partial PDF.
-  const pdfPath = path.join(directory, admissionPdfName(formData.fullName, audience));
+  const pdfPath = path.join(directory, admissionPdfName(formData.fullName, audience, part));
   await fsp.writeFile(pdfPath, await output.save());
   return pdfPath;
 }
 
-function admissionPdfName(name, copyType) {
+function admissionPdfName(name, copyType, part) {
   if (!["admin", "student"].includes(copyType)) throw new Error("Invalid PDF copy type");
+  if (copyType === "admin" && !ADMIN_PARTS.includes(part)) throw new Error("Invalid admin PDF part");
   const safeName = String(name || "").normalize("NFKD").replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || "Student";
-  return `SkyPro_GroundSchool_${safeName}_${copyType === "admin" ? "Admin" : "Student"}_Copy.pdf`;
+  if (copyType === "student") return `SkyPro_GroundSchool_${safeName}_Student_Copy.pdf`;
+  return `SkyPro_GroundSchool_${safeName}_Admin_${part === "form" ? "Form" : "Documents"}.pdf`;
 }
 
-module.exports = Object.assign(generatePDF, { admissionPdfName, buildSections, officeFields, pdfText, DECLARATION_PARAGRAPHS, APPENDED_UPLOADS, EMBEDDED_UPLOADS });
+module.exports = Object.assign(generatePDF, { admissionPdfName, buildSections, buildDocumentsPdf, officeFields, pdfText, DECLARATION_PARAGRAPHS, APPENDED_UPLOADS, EMBEDDED_UPLOADS, DOCUMENTS_COVER_PAGES });

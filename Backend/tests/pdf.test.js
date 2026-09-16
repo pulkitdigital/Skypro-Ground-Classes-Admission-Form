@@ -3,48 +3,85 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const zlib = require("node:zlib");
 const { PDFDocument } = require("pdf-lib");
 const generatePDF = require("../services/pdfGenerator");
-const { sampleAdmission, SAMPLE_DOCUMENTS } = require("./pdfFixtures");
+const { sampleAdmission, extractText, SAMPLE_DOCUMENTS } = require("./pdfFixtures");
 
 const A4_WIDTH = 595;
 
-// Decodes the hex text operators PDFKit writes for standard fonts.
-function extractText(bytes) {
-  const raw = bytes.toString("latin1");
-  let text = "";
-  for (const match of raw.matchAll(/stream\r?\n/g)) {
-    const start = match.index + match[0].length;
-    let content;
-    try { content = zlib.inflateSync(bytes.subarray(start, raw.indexOf("endstream", start))).toString("latin1"); } catch { continue; }
-    for (const hex of content.matchAll(/<([0-9a-fA-F]+)>/g)) text += Buffer.from(hex[1], "hex").toString("latin1");
-    text += "\n";
-  }
-  return text;
-}
-
-async function render(t, scenario, audience, alter = async () => {}) {
+async function setup(t, scenario, alter = async () => {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "skypro-pdf-test-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const { form, files } = await sampleAdmission(scenario, directory);
   await alter(files, form);
-  const bytes = await fs.readFile(await generatePDF(form, files, directory, { copyType: audience }));
-  const widths = (await PDFDocument.load(bytes)).getPages().map(page => Math.round(page.getWidth()));
+  return { directory, form, files };
+}
+
+async function inspect(file) {
+  const bytes = await fs.readFile(file);
+  return { text: extractText(bytes), widths: (await PDFDocument.load(bytes)).getPages().map(page => Math.round(page.getWidth())) };
+}
+
+async function render(t, scenario, audience, alter) {
+  const { directory, form, files } = await setup(t, scenario, alter);
+  const { text, widths } = await inspect(await generatePDF(form, files, directory, { copyType: audience }));
   const formPages = widths.filter(width => width === A4_WIDTH).length;
   assert.ok(formPages >= 2, "the form itself is rendered");
   assert.ok(widths.slice(0, formPages).every(width => width === A4_WIDTH), "attachments follow the form pages");
-  return { form, text: extractText(bytes), attachments: widths.slice(formPages), totalPages: widths.length };
+  return { form, text, attachments: widths.slice(formPages), totalPages: widths.length };
 }
-const pagesFor = fields => fields.flatMap(field => Array(SAMPLE_DOCUMENTS[field].pages).fill(SAMPLE_DOCUMENTS[field].width));
 
-test("admin PDF includes internal information, office use and ordered attachments without photo/signature pages", async t => {
-  const { form, text, attachments, totalPages } = await render(t, "indian-package", "admin");
-  assert.deepEqual(attachments, pagesFor(["aadhar", "marksheet10", "marksheet12"]));
-  for (const expected of ["ADMIN COPY", "GROUND SCHOOL ADMISSION FORM", "INTERNAL APPLICATION INFORMATION", form.applicationId, "STUDENT DETAILS", "DGCA INFORMATION", "EDUCATIONAL QUALIFICATION", "PARENT DETAILS", "EMERGENCY CONTACT", "COURSE & ENROLLMENT", "DECLARATION & UNDERTAKING", "SUBMITTED DOCUMENTS", "FOR OFFICE USE ONLY", "Aarav Sharma", "+91 9876543210", "Offline", "Complete Ground School Package", `of ${totalPages}`]) {
-    assert.ok(text.includes(expected), `missing ${expected}`);
+// Generates both admin files; `documents` is null when no Documents PDF was produced.
+async function renderAdmin(t, scenario, alter) {
+  const { directory, form, files } = await setup(t, scenario, alter);
+  const formPath = await generatePDF(form, files, directory, { copyType: "admin", part: "form" });
+  const documentsPath = await generatePDF(form, files, directory, { copyType: "admin", part: "documents" });
+  const safeName = form.fullName.replace(/ /g, "_");
+  assert.equal(path.basename(formPath), `SkyPro_GroundSchool_${safeName}_Admin_Form.pdf`);
+  if (documentsPath) assert.equal(path.basename(documentsPath), `SkyPro_GroundSchool_${safeName}_Admin_Documents.pdf`);
+  const adminForm = await inspect(formPath);
+  assert.ok(adminForm.widths.every(width => width === A4_WIDTH), "the admin form has no appended document pages");
+  return { form, directory, adminForm, documents: documentsPath && await inspect(documentsPath) };
+}
+
+const pagesFor = fields => fields.flatMap(field => Array(SAMPLE_DOCUMENTS[field].pages).fill(SAMPLE_DOCUMENTS[field].width));
+const ranges = text => [...text.matchAll(/In Documents PDF - pages? (\d+)(?:-(\d+))?/g)].map(match => [Number(match[1]), Number(match[2] || match[1])]);
+
+// The cover and the form must state the same ranges, and each range must hold that document's pages.
+function assertDocumentRanges({ adminForm, documents }, fields) {
+  assert.equal(documents.widths[0], A4_WIDTH, "cover page comes first");
+  assert.deepEqual(documents.widths.slice(generatePDF.DOCUMENTS_COVER_PAGES), pagesFor(fields));
+  const listed = ranges(documents.text);
+  assert.equal(listed.length, fields.length);
+  assert.deepEqual(ranges(adminForm.text), listed, "form Submitted Documents matches the cover index");
+  fields.forEach((field, index) => {
+    const [start, end] = listed[index];
+    assert.deepEqual(documents.widths.slice(start - 1, end), pagesFor([field]), `${field} is on pages ${start}-${end}`);
+  });
+}
+
+function assertFormFooter(text, pages, applicationId) {
+  const footers = [...text.matchAll(/Page (\d+) of (\d+)/g)].map(match => [Number(match[1]), Number(match[2])]);
+  assert.deepEqual(footers, Array.from({ length: pages }, (_, index) => [index + 1, pages]), "footer total counts form pages only");
+  assert.ok(text.includes(`Ground School Admission Form  |  ${applicationId}`));
+}
+
+test("admin Form PDF includes internal information and office use with no appended pages; Documents PDF holds cover and ordered documents", async t => {
+  const result = await renderAdmin(t, "indian-package");
+  const { form, adminForm, documents } = result;
+  for (const expected of ["ADMIN COPY", "GROUND SCHOOL ADMISSION FORM", "INTERNAL APPLICATION INFORMATION", form.applicationId, "STUDENT DETAILS", "DGCA INFORMATION", "EDUCATIONAL QUALIFICATION", "PARENT DETAILS", "EMERGENCY CONTACT", "COURSE & ENROLLMENT", "DECLARATION & UNDERTAKING", "SUBMITTED DOCUMENTS", "FOR OFFICE USE ONLY", "Aarav Sharma", "+91 9876543210", "Offline", "Complete Ground School Package", "Embedded in this form"]) {
+    assert.ok(adminForm.text.includes(expected), `missing ${expected}`);
   }
-  assert.equal(text.includes("JAIPUR LOCAL CONTACT"), false, "Jaipur contact is omitted when not supplied");
+  assert.equal(adminForm.text.includes("JAIPUR LOCAL CONTACT"), false, "Jaipur contact is omitted when not supplied");
+  assert.equal(adminForm.text.includes("Appended"), false);
+  assertFormFooter(adminForm.text, adminForm.widths.length, form.applicationId);
+
+  for (const expected of ["SUPPORTING DOCUMENTS", "Aarav Sharma", form.applicationId, "14 Sep 2026, 12:00 IST", "Aadhaar Card", "Class 10 Marksheet", "Class 12 Marksheet", `Page 1 of ${documents.widths.length}`]) {
+    assert.ok(documents.text.includes(expected), `cover missing ${expected}`);
+  }
+  assert.deepEqual(ranges(documents.text), [[2, 2], [3, 4], [5, 5]]);
+  assertDocumentRanges(result, ["aadhar", "marksheet10", "marksheet12"]);
+  for (const hidden of ["Passport", "DGCA Exam Result", "DGCA Medical Assessment"]) assert.equal(documents.text.includes(hidden), false, `${hidden} is not applicable`);
 });
 
 test("student audience never renders the Application ID or office section", async t => {
@@ -55,23 +92,49 @@ test("student audience never renders the Application ID or office section", asyn
   for (const hidden of [form.applicationId, "SKY-GS", "OFFICE USE", "INTERNAL APPLICATION", "ADMIN COPY", "Admission No.", "Verified By", "Remarks"]) assert.equal(text.includes(hidden), false, `leaked ${hidden}`);
 });
 
-test("foreign DGCA applicant renders conditional details and passport, marksheets, DGCA result and medical in order", async t => {
-  const { text, attachments } = await render(t, "foreign-individual-dgca", "admin");
+test("student copy stays a single file with appended documents and appended page numbers", async t => {
+  const { text, attachments, totalPages } = await render(t, "foreign-individual-dgca", "student");
   assert.deepEqual(attachments, pagesFor(["passport", "marksheet10", "marksheet12", "dgcaExamResult", "dgcaMedicalAssessment"]));
+  const formPages = totalPages - attachments.length;
+  assert.ok(text.includes(`Appended - page ${formPages + 1}`));
+  assert.ok(text.includes(`Page 1 of ${totalPages}`));
+  assert.equal(text.includes("In Documents PDF"), false);
+  assert.equal(text.includes("SUPPORTING DOCUMENTS"), false);
+});
+
+test("foreign DGCA applicant renders conditional details and passport, marksheets, DGCA result and medical in order", async t => {
+  const result = await renderAdmin(t, "foreign-individual-dgca");
+  assertDocumentRanges(result, ["passport", "marksheet10", "marksheet12", "dgcaExamResult", "dgcaMedicalAssessment"]);
   for (const expected of ["K1234567A", "Singapore", "DGCA-CN-778812", "Air Regulations", "10 Jun 2026", "EGCA-445566", "DGCA Class-1 Medical", "Diploma in Aeronautics", "JAIPUR LOCAL CONTACT", "Rohit Mehra", "Daniel Tan", "Uncle", "+65 91234567", "Individual Subject(s)", "Instagram"]) {
-    assert.ok(text.includes(expected), `missing ${expected}`);
+    assert.ok(result.adminForm.text.includes(expected), `missing ${expected}`);
   }
-  assert.equal(text.includes("Aadhaar Card"), false, "Aadhaar is not applicable to foreign nationals");
+  assertFormFooter(result.adminForm.text, result.adminForm.widths.length, result.form.applicationId);
+  assert.equal(result.adminForm.text.includes("Aadhaar Card"), false, "Aadhaar is not applicable to foreign nationals");
+  assert.equal(result.documents.text.includes("Aadhaar Card"), false);
 });
 
 test("unreadable or missing uploads do not stop generation and are flagged for the office", async t => {
-  const { text, attachments } = await render(t, "indian-package", "admin", async files => {
+  const result = await renderAdmin(t, "indian-package", async files => {
     await fs.writeFile(files.find(file => file.fieldname === "marksheet12").path, "not a pdf");
     await fs.rm(files.find(file => file.fieldname === "photo").path);
   });
-  assert.deepEqual(attachments, pagesFor(["aadhar", "marksheet10"]));
-  assert.ok(text.includes("could not be appended"));
-  assert.ok(text.includes("Photograph not available"));
+  assertDocumentRanges(result, ["aadhar", "marksheet10"]);
+  for (const text of [result.adminForm.text, result.documents.text]) {
+    assert.ok(text.includes("Class 12 Marksheet"));
+    assert.ok(text.includes("could not be appended"));
+  }
+  assert.ok(result.adminForm.text.includes("Photograph not available"));
+});
+
+test("no Documents PDF is produced when no supporting document can be appended", async t => {
+  const { form, directory, adminForm, documents } = await renderAdmin(t, "indian-package", async files => {
+    for (const file of files.filter(candidate => candidate.mimetype === "application/pdf")) await fs.writeFile(file.path, "not a pdf");
+  });
+  assert.equal(documents, null);
+  assert.equal((await fs.readdir(directory)).includes(generatePDF.admissionPdfName(form.fullName, "admin", "documents")), false);
+  assert.equal(adminForm.text.match(/could not be appended/g).length, 3);
+  assert.equal(ranges(adminForm.text).length, 0);
+  assertFormFooter(adminForm.text, adminForm.widths.length, form.applicationId);
 });
 
 test("office fields auto-populate ID, class mode and enrollment and leave administrative fields blank", async t => {
@@ -87,7 +150,7 @@ test("office fields auto-populate ID, class mode and enrollment and leave admini
   }
   assert.deepEqual(generatePDF.buildSections(form).map(section => section.id), ["student", "dgca", "education", "parents", "jaipur", "emergency", "course", "declaration", "documents"]);
   assert.equal(generatePDF.buildSections(form, { audience: "admin" })[0].id, "internal");
-  assert.equal(generatePDF.pdfText("Zo\u00eb \u0106wik \u0926\u0947\u0935 "), "Zo\u00eb Cwik ??? ");
+  assert.equal(generatePDF.pdfText("Zoë Ćwik देव "), "Zoë Cwik ??? ");
 });
 
 
@@ -98,9 +161,9 @@ test("both copies share all applicant sections and sanitize filenames", async t 
   const adminSections = generatePDF.buildSections(form, { audience: "admin" }).filter(section => section.id !== "internal");
   assert.deepEqual(adminSections, generatePDF.buildSections(form, { audience: "student" }));
   const texts = [];
-  for (const copyType of ["admin", "student"]) {
-    const target = await generatePDF(form, files, directory, { copyType });
-    assert.equal(path.basename(target), generatePDF.admissionPdfName(form.fullName, copyType));
+  for (const options of [{ copyType: "admin", part: "form" }, { copyType: "student" }]) {
+    const target = await generatePDF(form, files, directory, options);
+    assert.equal(path.basename(target), generatePDF.admissionPdfName(form.fullName, options.copyType, options.part));
     texts.push(extractText(await fs.readFile(target)));
   }
   for (const section of adminSections) {
@@ -112,4 +175,8 @@ test("both copies share all applicant sections and sanitize filenames", async t 
     }
   }
   assert.equal(generatePDF.admissionPdfName("../../<>:", "student"), "SkyPro_GroundSchool_Student_Student_Copy.pdf");
+  assert.equal(generatePDF.admissionPdfName("../../<>:", "admin", "form"), "SkyPro_GroundSchool_Student_Admin_Form.pdf");
+  assert.equal(generatePDF.admissionPdfName("Mei Lin Tan", "admin", "documents"), "SkyPro_GroundSchool_Mei_Lin_Tan_Admin_Documents.pdf");
+  assert.throws(() => generatePDF.admissionPdfName("Mei Lin Tan", "admin"), /admin PDF part/);
+  await assert.rejects(generatePDF(form, files, directory, { copyType: "admin" }), /admin PDF part/);
 });

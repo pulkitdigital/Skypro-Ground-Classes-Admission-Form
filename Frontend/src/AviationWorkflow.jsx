@@ -47,14 +47,14 @@ export default function AviationWorkflow({ form, errors, files, fileErrors, vali
       <h3 id="aviation-heading" className="text-2xl font-bold mb-3 pb-3 text-[#003366]">5. Aviation Background</h3>
       <div className="space-y-6">
         <section className={sectionClass} aria-labelledby="computer-number-heading">
-          <h4 id="computer-number-heading" className="text-xl font-bold text-[#003366]">A. DGCA Computer Number</h4>
+          <h4 id="computer-number-heading" className="text-xl font-bold text-[#003366]">DGCA Computer Number</h4>
           <Choice name="hasDgcaComputerNumber" label="Do You Have a DGCA Computer Number?" options={COMPUTER_NUMBER_OPTIONS} {...shared} />
           {visible.dgcaComputerNumber && <Detail name="dgcaComputerNumber" label="Enter DGCA Computer Number" {...shared} />}
         </section>
 
         {visible.dgcaPapersCleared && (
           <section className={sectionClass} aria-labelledby="dgca-papers-heading">
-            <h4 id="dgca-papers-heading" className="text-xl font-bold text-[#003366]">B. DGCA Papers</h4>
+            <h4 id="dgca-papers-heading" className="text-xl font-bold text-[#003366]">DGCA Papers</h4>
             <Choice name="dgcaPapersCleared" label="Have You Cleared Any DGCA Papers?" options={YES_NO_OPTIONS} {...shared} />
             {visible.dgcaSubjects && (
               <fieldset className="min-w-0" aria-describedby={errors.dgcaSubjects ? "dgcaSubjects-error" : undefined}>
@@ -88,14 +88,14 @@ export default function AviationWorkflow({ form, errors, files, fileErrors, vali
         )}
 
         <section className={sectionClass} aria-labelledby="egca-heading">
-          <h4 id="egca-heading" className="text-xl font-bold text-[#003366]">C. eGCA</h4>
+          <h4 id="egca-heading" className="text-xl font-bold text-[#003366]">eGCA</h4>
           <Choice name="hasEgcaId" label="Do You Have an eGCA ID?" options={YES_NO_OPTIONS} {...shared} />
           {visible.egcaId && <Detail name="egcaId" label="Enter eGCA ID" {...shared} />}
         </section>
 
         {visible.hasDgcaMedical && (
           <section className={sectionClass} aria-labelledby="medical-heading">
-            <h4 id="medical-heading" className="text-xl font-bold text-[#003366]">D. DGCA Medical</h4>
+            <h4 id="medical-heading" className="text-xl font-bold text-[#003366]">DGCA Medical</h4>
             <Choice name="hasDgcaMedical" label="Do You Have a DGCA Medical?" options={YES_NO_OPTIONS} {...shared} />
             {visible.dgcaMedicalClass && <Choice name="dgcaMedicalClass" label="DGCA Medical Type" options={MEDICAL_CLASSES} {...shared} />}
             {visible.dgcaMedicalAssessment && upload("dgcaMedicalAssessment")}

@@ -1,5 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const zlib = require("node:zlib");
 const sharp = require("sharp");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 const { normalizeAdmission } = require("../services/admissionContract");
@@ -44,6 +45,30 @@ const IMAGES = {
   parentSignature: signatureSvg("M40 120 C90 60 130 160 190 100 S300 150 350 90 S470 140 560 80"),
 };
 
+// Decodes the hex text operators PDFKit writes for standard fonts.
+function extractText(bytes) {
+  const raw = bytes.toString("latin1");
+  let text = "";
+  for (const match of raw.matchAll(/stream\r?\n/g)) {
+    const start = match.index + match[0].length;
+    let content;
+    try { content = zlib.inflateSync(bytes.subarray(start, raw.indexOf("endstream", start))).toString("latin1"); } catch { continue; }
+    for (const hex of content.matchAll(/<([0-9a-fA-F]+)>/g)) text += Buffer.from(hex[1], "hex").toString("latin1");
+    text += "\n";
+  }
+  return text;
+}
+
+async function sampleDocument(fieldname) {
+  const spec = SAMPLE_DOCUMENTS[fieldname];
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  for (let index = 0; index < spec.pages; index++) {
+    pdf.addPage([spec.width, 560]).drawText(`Sample ${fieldname} - page ${index + 1} of ${spec.pages}`, { x: 30, y: 520, size: 12, font, color: rgb(0.1, 0.2, 0.4) });
+  }
+  return Buffer.from(await pdf.save());
+}
+
 async function writeSampleUploads(directory, body) {
   const files = [];
   for (const { fieldname } of filesFor(body)) {
@@ -53,13 +78,7 @@ async function writeSampleUploads(directory, body) {
       buffer = await sharp(Buffer.from(IMAGES[fieldname])).jpeg().toBuffer();
       extension = ".jpg";
     } else {
-      const spec = SAMPLE_DOCUMENTS[fieldname];
-      const pdf = await PDFDocument.create();
-      const font = await pdf.embedFont(StandardFonts.Helvetica);
-      for (let index = 0; index < spec.pages; index++) {
-        pdf.addPage([spec.width, 560]).drawText(`Sample ${fieldname} - page ${index + 1} of ${spec.pages}`, { x: 30, y: 520, size: 12, font, color: rgb(0.1, 0.2, 0.4) });
-      }
-      buffer = Buffer.from(await pdf.save());
+      buffer = await sampleDocument(fieldname);
       extension = ".pdf";
     }
     const filePath = path.join(directory, fieldname + extension);
@@ -69,12 +88,17 @@ async function writeSampleUploads(directory, body) {
   return files;
 }
 
-async function sampleAdmission(name, directory, now = new Date("2026-09-14T06:30:00Z")) {
-  const { body, applicationId } = SCENARIOS[name];
+// Writes sample uploads for any request body and returns the normalized admission.
+async function admissionFromBody(body, applicationId, directory, now = new Date("2026-09-14T06:30:00Z")) {
   const files = await writeSampleUploads(directory, body);
   const form = normalizeAdmission(body, files, now);
   form.applicationId = applicationId;
   return { form, files };
 }
 
-module.exports = { SCENARIOS, SAMPLE_DOCUMENTS, sampleAdmission, writeSampleUploads };
+async function sampleAdmission(name, directory, now) {
+  const { body, applicationId } = SCENARIOS[name];
+  return admissionFromBody(body, applicationId, directory, now);
+}
+
+module.exports = { SCENARIOS, SAMPLE_DOCUMENTS, admissionFromBody, extractText, sampleAdmission, sampleDocument, writeSampleUploads };

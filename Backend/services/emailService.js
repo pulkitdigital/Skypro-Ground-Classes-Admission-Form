@@ -72,8 +72,13 @@ const htmlRows = rows => rows.map(([label, value]) => `
           </tr>`).join("");
 const textRows = rows => rows.map(([label, value]) => `${label}: ${value || "N/A"}`).join("\n");
 
-// Internal notification for SkyPro admissions (ADMIN_EMAIL).
-function buildAdminEmail(form, { from, to, pdfName, pdfContent }) {
+const DOCUMENTS_NOT_ATTACHED = "Supporting documents are NOT attached: none of the uploaded documents could be appended. See Submitted Documents in the form and request the originals from the student.";
+
+// Internal notification for SkyPro admissions (ADMIN_EMAIL). `documentsPdf` is
+// omitted when no supporting document could be appended.
+function buildAdminEmail(form, { from, to, formPdf, documentsPdf }) {
+  const attachments = [formPdf, documentsPdf].filter(Boolean);
+  const attachmentLine = `Attachments: ${attachments.map(file => file.name).join(", ")}`;
   const emergency = form.emergencyContact || {};
   const applicationId = form.applicationId || "Not allocated";
   const rows = [
@@ -104,8 +109,12 @@ function buildAdminEmail(form, { from, to, pdfName, pdfContent }) {
       </div>
 
       <p style="color: #059669; font-weight: bold; margin: 20px 0;">
-        📎 The combined admission PDF (form and submitted documents) is attached.
-      </p>
+        📎 ${escapeHtml(attachmentLine)}
+      </p>${documentsPdf ? "" : `
+
+      <p style="color: #b91c1c; font-weight: bold; margin: 20px 0;">
+        ⚠️ ${escapeHtml(DOCUMENTS_NOT_ATTACHED)}
+      </p>`}
 
       <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
 
@@ -114,8 +123,8 @@ function buildAdminEmail(form, { from, to, pdfName, pdfContent }) {
       </p>
     </div>
   `,
-    textContent: `New Ground School admission application received.\n\n${textRows(rows)}\n\nThe combined admission PDF (form and submitted documents) is attached.\n\nInternal notification from the SkyPro Aviation admission system. Do not forward to the applicant.`,
-    attachment: [{ name: pdfName, content: pdfContent }],
+    textContent: `New Ground School admission application received.\n\n${textRows(rows)}\n\n${attachmentLine}${documentsPdf ? "" : `\n${DOCUMENTS_NOT_ATTACHED}`}\n\nInternal notification from the SkyPro Aviation admission system. Do not forward to the applicant.`,
+    attachment: attachments.map(({ name, content }) => ({ name, content })),
   };
 }
 
@@ -205,28 +214,30 @@ function assertStudentSafe(message, form) {
 
 // `delivered` is owned by the queue job, so a job retry resends only the
 // message that has not been delivered yet.
-async function sendAdminEmail({ formData, adminPdfPath, studentPdfPath, delivered = {}, retryDelay = attempt => attempt * 3000 }) {
+// `adminDocumentsPdfPath` is null when no supporting document could be appended.
+async function sendAdminEmail({ formData, adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath, delivered = {}, retryDelay = attempt => attempt * 3000 }) {
   const FROM_EMAIL = process.env.MAIL_FROM;
   const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
   if (!FROM_EMAIL || !ADMIN_EMAIL) {
     throw new Error("❌ MAIL_FROM or ADMIN_EMAIL missing in .env");
   }
-  if (!adminPdfPath || !studentPdfPath) throw new Error("Both Admin and Student Copy PDFs are required");
-  if (path.resolve(adminPdfPath) === path.resolve(studentPdfPath)) throw new Error("Admin and Student Copy PDFs must be separate files");
-  if (path.basename(adminPdfPath) !== admissionPdfName(formData.fullName, "admin") || path.basename(studentPdfPath) !== admissionPdfName(formData.fullName, "student")) {
+  if (!adminFormPdfPath || !studentPdfPath) throw new Error("Both Admin Form and Student Copy PDFs are required");
+  const adminPaths = [["form", adminFormPdfPath], ["documents", adminDocumentsPdfPath]].filter(([, file]) => file);
+  if (adminPaths.some(([, file]) => path.resolve(file) === path.resolve(studentPdfPath)) || (adminDocumentsPdfPath && path.resolve(adminFormPdfPath) === path.resolve(adminDocumentsPdfPath))) {
+    throw new Error("Admin and Student Copy PDFs must be separate files");
+  }
+  if (adminPaths.some(([part, file]) => path.basename(file) !== admissionPdfName(formData.fullName, "admin", part)) || path.basename(studentPdfPath) !== admissionPdfName(formData.fullName, "student")) {
     throw new Error("PDF copy paths do not match their intended recipients");
   }
-  const adminBytes = await fs.readFile(adminPdfPath);
   const studentBytes = await fs.readFile(studentPdfPath);
-  if (adminBytes.equals(studentBytes)) throw new Error("Admin and Student Copy PDFs must have different content");
+  const [formPdf, documentsPdf] = await Promise.all(adminPaths.map(async ([part, file]) => {
+    const bytes = await fs.readFile(file);
+    if (bytes.equals(studentBytes)) throw new Error("Admin and Student Copy PDFs must have different content");
+    return { name: admissionPdfName(formData.fullName, "admin", part), content: bytes.toString("base64") };
+  }));
 
-  const admin = buildAdminEmail(formData, {
-    from: FROM_EMAIL,
-    to: ADMIN_EMAIL,
-    pdfName: admissionPdfName(formData.fullName, "admin"),
-    pdfContent: adminBytes.toString("base64"),
-  });
+  const admin = buildAdminEmail(formData, { from: FROM_EMAIL, to: ADMIN_EMAIL, formPdf, documentsPdf });
   const student = buildStudentEmail(formData, { from: FROM_EMAIL, contactEmail: ADMIN_EMAIL,
     pdfName: admissionPdfName(formData.fullName, "student"), pdfContent: studentBytes.toString("base64") });
   assertStudentSafe(student, formData);

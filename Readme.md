@@ -7,7 +7,7 @@ An online admission form for the SkyPro Aviation Ground School (DGCA ground clas
 The Express backend validates every field and file again, verifies reCAPTCHA, allocates an internal SkyPro Application ID, and returns immediately. An in-memory background queue then:
 
 1. generates the admin admission PDF (form, office-use section, and appended documents),
-2. emails the admin (with the PDF) and the applicant (confirmation only) through Brevo,
+2. emails the admin (with the Form PDF and the supporting Documents PDF) and the applicant (confirmation with the Student Copy PDF) through Brevo,
 3. appends a row to the `Ground School Admissions` tab of a Google Sheet.
 
 There is no database. Google Sheets is the only persistent store (admission rows and the Application ID ledger); uploaded files are temporary.
@@ -31,7 +31,7 @@ flowchart LR
   A -->|"siteverify"| R
   A -->|"allocate ID"| L[("Sheet tab: GroundSchoolApplicationIDs")]
   A -->|"addJob"| Q["In-memory queue"]
-  Q --> P["Admin PDF: PDFKit + pdf-lib"]
+  Q --> P["PDFs: PDFKit + pdf-lib"]
   Q --> E["Brevo: admin and student emails"]
   Q --> S[("Sheet tab: Ground School Admissions")]
 ```
@@ -105,6 +105,7 @@ Skypro Ground Classes Form/
     │   ├── formatting.js             # Date/phone display helpers
     │   └── convertImageToPdf.js      # Entirely commented out; not used
     ├── scripts/applicationIdLock.js  # Admin tool: inspect/release a stuck ID lock
+    ├── scripts/previewEmails.js      # Testing only: preview/send admin and student emails for fictional applicants
     ├── tests/                        # node:test suites and fixtures
     ├── assets/                       # header.png, footer.png (PDF branding; .webp copies unused)
     ├── uploads/                      # Temporary request directories (git-ignored)
@@ -484,8 +485,9 @@ Format: **`SKY-GS-YYYY-MM-NNNN`**, e.g. `SKY-GS-2026-09-0001`. The sequence is z
 | Ledger tab `GroundSchoolApplicationIDs` | Yes (reservation history) |
 | Queue job `formData.applicationId` (memory) | Yes |
 | `Ground School Admissions` sheet, column B | Yes |
-| Admin PDF (Internal Application Information, office section, page footers) | Yes |
-| Admin email (subject, HTML, plain text, PDF content) | Yes |
+| Admin Form PDF (Internal Application Information, office section, page footers) | Yes |
+| Admin Documents PDF (cover page and its footer) | Yes |
+| Admin email (subject, HTML, plain text, PDF attachments) | Yes |
 | API response, success popup, page banner | No |
 | Student email and Student Copy attachment | No |
 | Student Copy PDF sent to applicant | No |
@@ -494,9 +496,17 @@ Format: **`SKY-GS-YYYY-MM-NNNN`**, e.g. `SKY-GS-2026-09-0001`. The sequence is z
 
 ## PDF generation
 
-`services/pdfGenerator.js` renders an A4 document with PDFKit and appends documents with pdf-lib. The queue generates both `copyType: "admin"` and `copyType: "student"` before sending emails. Each uses the shared layout and supporting-document merging. Files are named `SkyPro_GroundSchool_<SanitizedStudentName>_Admin_Copy.pdf` and `SkyPro_GroundSchool_<SanitizedStudentName>_Student_Copy.pdf` inside the job upload directory and cleaned with that directory. Retries reuse completed PDFs and do not resend confirmed deliveries.
+`services/pdfGenerator.js` renders A4 pages with PDFKit and merges supporting documents with pdf-lib. Before sending emails the queue generates three files, all sharing the same layout and document-merge code:
 
-**Branding and page furniture.** `Backend/assets/header.png` and `footer.png` are drawn full-width on every form page when present. Each form page has a footer line: `Ground School Admission Form | <Application ID>` (admin) and `Page X of Y`, where Y includes appended pages.
+| Call | File | Contents |
+| --- | --- | --- |
+| `{ copyType: "admin", part: "form" }` | `SkyPro_GroundSchool_<SanitizedStudentName>_Admin_Form.pdf` | Form pages only; no documents appended |
+| `{ copyType: "admin", part: "documents" }` | `SkyPro_GroundSchool_<SanitizedStudentName>_Admin_Documents.pdf` | Cover/index page followed by the supporting documents. Not generated (`null`) when no document could be appended |
+| `{ copyType: "student" }` | `SkyPro_GroundSchool_<SanitizedStudentName>_Student_Copy.pdf` | Form pages followed by the appended supporting documents |
+
+The files are written inside the job upload directory and cleaned with that directory. Document page ranges are computed by merging the documents before the form is rendered, so the admin form and the Documents PDF cover always state the same pages. Retries reuse completed PDFs and do not resend confirmed deliveries.
+
+**Branding and page furniture.** `Backend/assets/header.png` and `footer.png` are drawn full-width on every form page when present. Each form page has a footer line: `Ground School Admission Form | <Application ID>` (admin) and `Page X of Y`. In the admin Form PDF, Y counts form pages only; in the Student Copy, Y includes the appended pages.
 
 **Admin PDF sections** (numbered automatically):
 
@@ -510,7 +520,7 @@ Format: **`SKY-GS-YYYY-MM-NNNN`**, e.g. `SKY-GS-2026-09-0001`. The sequence is z
 8. Emergency Contact — resolved contact
 9. Course & Enrollment — course selection, subjects, class mode, how heard
 10. Declaration & Undertaking — the five paragraphs, acceptance, student name, declaration date, embedded student and parent signatures
-11. Submitted Documents — each applicable document with "Embedded in this form", "Appended - pages X-Y", "Not provided", or "Uploaded, but could not be appended - request the original from the student"
+11. Submitted Documents — each applicable document with "Embedded in this form", "In Documents PDF - pages X-Y" (page numbers of the Documents PDF, cover page included), "Not provided", or "Uploaded, but could not be appended - request the original from the student". The Student Copy shows "Appended - pages X-Y" instead.
 12. **For Office Use Only** (admin only, kept on one page when it fits)
 
 **For Office Use Only.**
@@ -524,7 +534,10 @@ Format: **`SKY-GS-YYYY-MM-NNNN`**, e.g. `SKY-GS-2026-09-0001`. The sequence is z
 | Final Course Fee Payable, Registration Amount Received, Full Fee Received | Blank box with `INR` prefix |
 | Registration Payment Date, Final Payment Date, Date | Blank box with `DD / MM / YYYY` guide |
 
-**Appended documents** (after the form pages, in this order): Aadhaar, Passport, Class 10 Marksheet, Class 12 Marksheet, DGCA Exam Result, DGCA Medical Assessment. Only applicable documents are included. Photo and signatures are embedded, not appended. An unreadable document does not stop generation; it is listed as not appended.
+**Supporting documents** (in this order): Aadhaar, Passport, Class 10 Marksheet, Class 12 Marksheet, DGCA Exam Result, DGCA Medical Assessment. Only applicable documents are included, and their pages are copied unmodified (no stamping or resizing). Photo and signatures are embedded in the form, not appended. An unreadable document does not stop generation; it is listed as not appended.
+
+- **Admin Documents PDF:** page 1 is a cover/index page ("SUPPORTING DOCUMENTS", student full name, SkyPro Application ID, submission time in IST, and a table with each applicable document's status or page range, using the same statuses as the form). The documents follow from page 2. If no document could be appended, this PDF is not generated.
+- **Student Copy:** the documents are appended directly after the form pages.
 
 **Limitations.** Standard PDF fonts encode Latin (WinAnsi) text only. Accented Latin characters are kept or reduced to their base letter; other scripts (e.g. Devanagari) are printed as `?`.
 
@@ -540,7 +553,7 @@ The `student` audience omits the Internal Application Information and office sec
 | Subject | `New Ground School Admission – <Full Name> – <Application ID>` | `Admission Application Received – SkyPro Aviation` |
 | Content | SkyPro Application ID (Internal), applicant name, course/package, subjects, class mode, WhatsApp number, email, emergency contact (name, relationship, phone), submission time (IST); footer "Internal notification … Do not forward to the applicant." | Greeting, confirmation that the application for the selected course was received and is being processed, next steps (contact within 2-3 business days), course, subjects, mode, submission time, contact email (`ADMIN_EMAIL`) and phone `+91 8209388460` |
 | Formats | HTML and plain text | HTML and plain text |
-| Attachment | `SkyPro_GroundSchool_<Name>_Admin_Copy.pdf` with supporting documents | `SkyPro_GroundSchool_<Name>_Student_Copy.pdf` with supporting documents |
+| Attachments | 1. `SkyPro_GroundSchool_<Name>_Admin_Form.pdf` (form only), 2. `SkyPro_GroundSchool_<Name>_Admin_Documents.pdf` (cover + supporting documents). The HTML and plain-text bodies list both names in an "Attachments:" line. If no document could be appended, only the Form PDF is attached and the body states that supporting documents are not attached | `SkyPro_GroundSchool_<Name>_Student_Copy.pdf` with supporting documents |
 | Internal data | Included | Excluded: built only from applicant-facing fields; a guard refuses to send if the message contains the Application ID, "Application ID", "Office Use", "Admission No", "Verified By", "Remarks"; only the Student Copy attachment is allowed |
 
 Applicant text is HTML-escaped in both HTML bodies.
@@ -651,9 +664,9 @@ The same spreadsheet also holds the `GroundSchoolApplicationIDs` ledger tab (see
 `services/queueService.js` keeps jobs in process memory.
 
 - **Order:** jobs are processed one at a time, first in, first out.
-- **Stages per job:** (1) generate the admin PDF (regenerated only if the file is missing), (2) send emails (skipped once both are delivered), (3) append the Sheets row (skipped once written).
+- **Stages per job:** (1) generate the admin Form PDF, the admin Documents PDF and the Student Copy PDF (on a retry, only a file that is missing is regenerated; a Documents PDF that could not be produced because no document was appendable is not retried), (2) send emails (skipped once both recipients are delivered), (3) append the Sheets row (skipped once written).
 - **Retries:** a job is attempted at most 3 times. After a failed attempt it moves to the back of the queue and processing pauses for 5 s (after attempt 1) or 10 s (after attempt 2); this pause also delays other queued jobs.
-- **Cleanup:** the job's upload directory (uploads and generated PDF) is deleted after success or after the third failed attempt. Failed jobs are then discarded with only a console log; there is no failure history or dead-letter store.
+- **Cleanup:** the job's upload directory (uploads and all generated PDFs) is deleted after success or after the third failed attempt. Failed jobs are then discarded with only a console log; there is no failure history or dead-letter store.
 - **Restarts:** queued jobs are lost on crash or restart. Their Application IDs stay reserved in the ledger. Orphaned `uploads/admission-*` directories older than 24 hours are deleted at server start and every 6 hours. Loose files in `uploads/` are not touched.
 - **Status:** `GET /api/queue-status` exposes only queue length, processing flag, and counts per status.
 
@@ -696,7 +709,10 @@ The same spreadsheet also holds the `GroundSchoolApplicationIDs` ledger tab (see
 | `Frontend` | `node --test "src/*.test.js"` | Frontend unit tests (no npm script is defined) |
 | `Backend` | `npm start` | Start the API (`node server.js`) |
 | `Backend` | `npm test` | All backend tests (`node --test --test-isolation=none tests/*.test.js`) |
-| `Backend` | `node test-pdf.js` | Generate admin and student sample PDFs for two fictional applicants into `Backend/tmp/pdfs` |
+| `Backend` | `node test-pdf.js` | Generate the admin Form PDF, admin Documents PDF and Student Copy for two fictional applicants into `Backend/tmp/pdfs` |
+| `Backend` | `node scripts/previewEmails.js` | Testing only, dry run: runs fictional `indian`, `foreign` and `unreadable` applicants (fake IDs `SKY-GS-TEST-0001`…`0003`) through the real queue, PDF and email code with Brevo stubbed; writes `payload.json`, `body.html`, `body.txt` and `attachments/` per recipient to `Backend/tmp/email-preview/<scenario>/`, prints a summary and PASS/FAIL checks (exit code 1 on any FAIL). Never calls the API, reCAPTCHA, Google Sheets or the ID ledger |
+| `Backend` | `node scripts/previewEmails.js --smtp-local [--smtp-host localhost] [--smtp-port 1025] [--scenario indian\|foreign\|unreadable\|all]` | Testing only, no Brevo key needed: same run as the dry run (Brevo stubbed, all checks, same `tmp/email-preview` files), then relays each captured email unchanged with nodemailer to a local SMTP catcher such as Mailpit (view at http://localhost:8025). Subject gets a `[LOCAL] ` prefix; recipients are fixed to `admin@preview.local` and `student@preview.local`. Only `localhost`/`127.0.0.1` are accepted; if nothing listens it stops with "Mailpit start karo: http://localhost:8025". Runs all scenarios unless `--scenario` is given |
+| `Backend` | `node scripts/previewEmails.js --send --to <test@email> [--scenario indian\|foreign\|unreadable\|all]` | Testing only: same run, but sends through real Brevo (`BREVO_API_KEY`, `MAIL_FROM` from `.env`). Both admin and student messages go only to `--to`, with a `[TEST] ` subject prefix; `ADMIN_EMAIL` and applicant addresses are never used, and `info@skyproaviation.org` is refused. Sends `indian` unless `--scenario` is given |
 | `Backend` | `node scripts/applicationIdLock.js status YYYY-MM` | Show a month's allocation lock (uses real `.env` and Google) |
 | `Backend` | `node scripts/applicationIdLock.js release YYYY-MM <token> --all-instances-stopped` | Release a stuck lock after stopping every backend instance |
 
@@ -709,22 +725,23 @@ Invoke-RestMethod http://localhost:5000/api/queue-status
 
 ## Testing
 
-**Backend (`npm test`, 42 tests).** Google Sheets, Brevo, and reCAPTCHA are replaced by in-process fakes or mocks; no email is sent and no spreadsheet is written.
+**Backend (`npm test`, 58 tests).** Google Sheets, Brevo, and reCAPTCHA are replaced by in-process fakes or mocks; no email is sent and no spreadsheet is written.
 
 | File | Covers |
 | --- | --- |
-| `scenarios.test.js` | Cross-stack matrix: imports the real frontend models from `Frontend/src`, builds the multipart payload for each scenario, and runs it through the backend contract, Sheets row, PDF sections, and email builders — nationality switch, computer number Yes/No/Applied, papers Yes/No, eGCA Yes/No, medical Class 1/Class 2/No, Other qualification, all Physics/Mathematics options, Jaipur Yes/No, every emergency source, package/one/multiple subjects, Online/Offline, same/independent address, invalid uploads, missing conditional fields, unchecked declaration, Application ID visibility, and stale hidden fields |
+| `scenarios.test.js` | Cross-stack matrix: imports the real frontend models from `Frontend/src`, builds the multipart payload for each scenario, and runs it through the backend contract, Sheets row, PDF sections, admin Documents PDF, and email builders — nationality switch, computer number Yes/No/Applied, papers Yes/No, eGCA Yes/No, medical Class 1/Class 2/No, Other qualification, all Physics/Mathematics options, Jaipur Yes/No, every emergency source, package/one/multiple subjects, Online/Offline, same/independent address, invalid uploads, missing conditional fields, unchecked declaration, Application ID visibility, and stale hidden fields |
 | `contract.test.js` | Backend validation rules and derived values |
 | `api.test.js` | Real multipart requests: rejected inputs and uploads with cleanup, reCAPTCHA failures, allocation and queue failures, successful submission without ID in response |
 | `origin.test.js` | CORS allowlist, 403 origin rejection, reCAPTCHA hostname check |
 | `applicationId.test.js` | Concurrent allocation, restarts, monthly/yearly rollover, lost responses, stuck and released locks, corrupted ledger |
-| `pdf.test.js` | Real PDF generation: admin vs student content, section and attachment order, unreadable/missing uploads, office fields |
-| `email.test.js` | Admin/student templates, no internal data to the student, per-recipient retry |
+| `pdf.test.js` | Real PDF generation: admin Form PDF without appended pages and with form-only footer totals, Documents PDF cover and document order, page ranges matching between form and cover, unreadable/missing uploads, no Documents PDF when nothing is appendable, unchanged Student Copy, office fields |
+| `email.test.js` | Admin/student templates, admin Form + Documents attachments (names and order), Form-only admin email with a note, no internal data and only the Student Copy for the student, per-recipient retry |
 | `sheet.test.js` | Column letters, row mapping, formula escaping, tab creation, header verification, duplicate skip |
-| `queue.test.js` | Stage retries, cleanup on success and exhaustion, public status shape |
+| `previewEmails.test.js` | Email preview script: dry run of all scenarios with Google, ledger, Sheets, `fetch`, HTTP and sockets stubbed to throw; output files; `--smtp-local` with a mocked nodemailer transport (2 mails per scenario, local recipients, `[LOCAL]` prefix, attachment names/order/type, no Brevo key or Brevo call, Mailpit hint, local-host guard); send mode overriding recipients with the `[TEST]` prefix; argument and `--to` safety |
+| `queue.test.js` | Stage retries, regenerating only a missing admin PDF, cleanup of all PDFs on success and exhaustion, public status shape |
 | `upload.test.js` | Stale directory purge, MIME/extension rules |
 
-**Frontend (`node --test "src/*.test.js"`, 37 tests).** Model tests for student details (age, phones, addresses, nationality, drafts, upload rules, multipart), contacts, education, enrollment, aviation workflow, declaration, and API error mapping.
+**Frontend (`node --test "src/*.test.js"`, 40 tests).** Model tests for student details (age, phones, addresses, nationality, drafts, upload rules, multipart), contacts, education, enrollment, aviation workflow, declaration, and API error mapping.
 
 **Not automated.** Live Brevo delivery, live Google Sheets writes and ID ledger, live reCAPTCHA verification, and a real browser submission against a running backend. Verify these in staging with test recipients and a test spreadsheet (see [Production deployment](#production-deployment)).
 
@@ -764,7 +781,7 @@ Add `groundschool.skyproaviation.org` to the domain list of the reCAPTCHA site w
 3. In `Frontend`, with the production variables set, run `npm ci` and `npm run build`.
 4. Upload the contents of `Frontend/dist` to the web root for `groundschool.skyproaviation.org`, including the hidden `.htaccess` file when using Apache (requires `mod_rewrite`; other hosts ignore it).
 5. Point DNS and HTTPS for the hostname to the static host (outside this repository).
-6. Submit a test application with test recipients and confirm: success message without ID, reset form, admin email with PDF, student email with Student Copy PDF and without internal ID, new row in `Ground School Admissions`, and a reservation in `GroundSchoolApplicationIDs`.
+6. Submit a test application with test recipients and confirm: success message without ID, reset form, admin email with `..._Admin_Form.pdf` and `..._Admin_Documents.pdf` (open both; page ranges in the form's Submitted Documents match the Documents PDF cover), student email with only the Student Copy PDF and without internal ID, new row in `Ground School Admissions`, and a reservation in `GroundSchoolApplicationIDs`.
 
 ## Troubleshooting
 

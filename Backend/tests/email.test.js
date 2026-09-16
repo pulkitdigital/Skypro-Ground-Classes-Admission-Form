@@ -27,17 +27,22 @@ async function mailSetup(t, send = async () => ({ messageId: "test-only" })) {
   Object.assign(process.env, { BREVO_API_KEY: "mock", MAIL_FROM: "sender@example.com", ADMIN_EMAIL: "info@skyproaviation.org" });
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "skypro-email-test-"));
   t.after(async () => { for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } await fs.rm(dir, { recursive: true, force: true }); });
-  const adminPdfPath = path.join(dir, "SkyPro_GroundSchool_Test_Student_Admin_Copy.pdf");
+  const adminFormPdfPath = path.join(dir, "SkyPro_GroundSchool_Test_Student_Admin_Form.pdf");
+  const adminDocumentsPdfPath = path.join(dir, "SkyPro_GroundSchool_Test_Student_Admin_Documents.pdf");
   const studentPdfPath = path.join(dir, "SkyPro_GroundSchool_Test_Student_Student_Copy.pdf");
   await fs.writeFile(studentPdfPath, "student-only-pdf");
-  await fs.writeFile(adminPdfPath, "admin-only-pdf");
-  return { messages, adminPdfPath, studentPdfPath };
+  await fs.writeFile(adminFormPdfPath, "admin-form-pdf");
+  await fs.writeFile(adminDocumentsPdfPath, "admin-documents-pdf");
+  return { messages, adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath };
 }
 const byRecipient = (messages, email) => messages.filter(message => message.to[0].email === email);
 
+const FORM_PDF = { name: "SkyPro_GroundSchool_Test_Student_Admin_Form.pdf", content: "Zm9ybQ==" };
+const DOCUMENTS_PDF = { name: "SkyPro_GroundSchool_Test_Student_Admin_Documents.pdf", content: "ZG9jcw==" };
+
 test("admin template carries applicant, course, mode, contact details and the internal ID", () => {
   const form = admission();
-  const email = sendAdmissionEmails.buildAdminEmail(form, { from: "sender@example.com", to: "info@skyproaviation.org", pdfName: `${ID}-Test-Student-Admission-Form.pdf`, pdfContent: "cGRm" });
+  const email = sendAdmissionEmails.buildAdminEmail(form, { from: "sender@example.com", to: "info@skyproaviation.org", formPdf: FORM_PDF, documentsPdf: DOCUMENTS_PDF });
   assert.equal(email.to[0].email, "info@skyproaviation.org");
   assert.ok(email.subject.includes("Test Student") && email.subject.includes(ID));
   for (const body of [email.htmlContent, email.textContent]) {
@@ -45,7 +50,21 @@ test("admin template carries applicant, course, mode, contact details and the in
       assert.ok(body.includes(expected), `admin email missing ${expected}`);
     }
   }
-  assert.deepEqual(email.attachment, [{ name: `${ID}-Test-Student-Admission-Form.pdf`, content: "cGRm" }]);
+  assert.deepEqual(email.attachment, [FORM_PDF, DOCUMENTS_PDF]);
+  for (const body of [email.htmlContent, email.textContent]) {
+    assert.ok(body.includes(`Attachments: ${FORM_PDF.name}, ${DOCUMENTS_PDF.name}`));
+    assert.equal(body.includes("NOT attached"), false);
+  }
+});
+
+test("admin template attaches only the Form PDF and says so when no Documents PDF exists", () => {
+  const email = sendAdmissionEmails.buildAdminEmail(admission(), { from: "sender@example.com", to: "info@skyproaviation.org", formPdf: FORM_PDF });
+  assert.deepEqual(email.attachment, [FORM_PDF]);
+  for (const body of [email.htmlContent, email.textContent]) {
+    assert.ok(body.includes(`Attachments: ${FORM_PDF.name}`));
+    assert.equal(body.includes(DOCUMENTS_PDF.name), false);
+    assert.ok(body.includes("Supporting documents are NOT attached"));
+  }
 });
 
 test("student template has no internal identifier or office fields, and escapes applicant text", () => {
@@ -63,32 +82,44 @@ test("student template has no internal identifier or office fields, and escapes 
 });
 
 test("sending routes distinct copies to their intended recipients", async t => {
-  const { messages, adminPdfPath, studentPdfPath } = await mailSetup(t);
-  await sendAdmissionEmails({ formData: admission(), adminPdfPath, studentPdfPath, retryDelay: () => 0 });
+  const { messages, adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath } = await mailSetup(t);
+  await sendAdmissionEmails({ formData: admission(), adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath, retryDelay: () => 0 });
   assert.equal(messages.length, 2);
   const [admin] = byRecipient(messages, "info@skyproaviation.org");
   const [student] = byRecipient(messages, "student@example.com");
   assert.ok(admin.subject.includes(ID) && admin.htmlContent.includes(ID) && admin.textContent.includes(ID));
-  assert.equal(admin.attachment.length, 1);
-  assert.equal(admin.attachment[0].name, "SkyPro_GroundSchool_Test_Student_Admin_Copy.pdf");
-  assert.equal(Buffer.from(admin.attachment[0].content, "base64").toString(), "admin-only-pdf");
+  assert.deepEqual(admin.attachment.map(file => [file.name, Buffer.from(file.content, "base64").toString()]), [
+    ["SkyPro_GroundSchool_Test_Student_Admin_Form.pdf", "admin-form-pdf"],
+    ["SkyPro_GroundSchool_Test_Student_Admin_Documents.pdf", "admin-documents-pdf"],
+  ]);
   for (const hidden of INTERNAL) assert.equal(JSON.stringify(student).includes(hidden), false, `student email leaked ${hidden}`);
   assert.equal(student.attachment[0].name, "SkyPro_GroundSchool_Test_Student_Student_Copy.pdf");
   assert.equal(Buffer.from(student.attachment[0].content, "base64").toString(), "student-only-pdf");
 });
 
+test("without a Documents PDF the admin gets only the Form PDF and a note; the student email is unchanged", async t => {
+  const { messages, adminFormPdfPath, studentPdfPath } = await mailSetup(t);
+  await sendAdmissionEmails({ formData: admission(), adminFormPdfPath, adminDocumentsPdfPath: null, studentPdfPath, retryDelay: () => 0 });
+  const [admin] = byRecipient(messages, "info@skyproaviation.org");
+  const [student] = byRecipient(messages, "student@example.com");
+  assert.deepEqual(admin.attachment.map(file => file.name), ["SkyPro_GroundSchool_Test_Student_Admin_Form.pdf"]);
+  assert.ok(admin.htmlContent.includes("Supporting documents are NOT attached") && admin.textContent.includes("Supporting documents are NOT attached"));
+  for (const hidden of INTERNAL) assert.equal(JSON.stringify(student).includes(hidden), false, `student email leaked ${hidden}`);
+  assert.deepEqual(student.attachment.map(file => file.name), ["SkyPro_GroundSchool_Test_Student_Student_Copy.pdf"]);
+});
+
 test("a failed recipient is retried on the next job attempt without resending the delivered one", async t => {
   let studentAvailable = false;
-  const { messages, adminPdfPath, studentPdfPath } = await mailSetup(t, async message => {
+  const { messages, adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath } = await mailSetup(t, async message => {
     if (message.to[0].email === "student@example.com" && !studentAvailable) throw new Error("Brevo unavailable");
     return { messageId: "test-only" };
   });
   const delivered = {};
-  await assert.rejects(sendAdmissionEmails({ formData: admission(), adminPdfPath, studentPdfPath, delivered, retryDelay: () => 0 }), /Student Confirmation failed after 3 attempts/);
+  await assert.rejects(sendAdmissionEmails({ formData: admission(), adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath, delivered, retryDelay: () => 0 }), /Student Confirmation failed after 3 attempts/);
   assert.deepEqual(delivered, { admin: true });
   assert.equal(byRecipient(messages, "info@skyproaviation.org").length, 1);
   studentAvailable = true;
-  await sendAdmissionEmails({ formData: admission(), adminPdfPath, studentPdfPath, delivered, retryDelay: () => 0 });
+  await sendAdmissionEmails({ formData: admission(), adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath, delivered, retryDelay: () => 0 });
   assert.deepEqual(delivered, { admin: true, student: true });
   assert.equal(byRecipient(messages, "info@skyproaviation.org").length, 1, "admin email is not duplicated");
   assert.equal(byRecipient(messages, "student@example.com").length, 4);
@@ -96,12 +127,17 @@ test("a failed recipient is retried on the next job attempt without resending th
 
 
 test("missing, swapped, identical and reused admin copies are rejected before sending", async t => {
-  const { messages, adminPdfPath, studentPdfPath } = await mailSetup(t);
-  const base = { formData: admission(), adminPdfPath, studentPdfPath };
+  const { messages, adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath } = await mailSetup(t);
+  const base = { formData: admission(), adminFormPdfPath, adminDocumentsPdfPath, studentPdfPath };
   await assert.rejects(sendAdmissionEmails({ ...base, studentPdfPath: undefined }), /Both Admin/);
-  await assert.rejects(sendAdmissionEmails({ ...base, studentPdfPath: adminPdfPath }), /separate files/);
-  await assert.rejects(sendAdmissionEmails({ ...base, adminPdfPath: studentPdfPath, studentPdfPath: adminPdfPath }), /intended recipients/);
-  await fs.copyFile(adminPdfPath, studentPdfPath);
+  await assert.rejects(sendAdmissionEmails({ ...base, adminFormPdfPath: undefined }), /Both Admin/);
+  await assert.rejects(sendAdmissionEmails({ ...base, studentPdfPath: adminFormPdfPath }), /separate files/);
+  await assert.rejects(sendAdmissionEmails({ ...base, adminDocumentsPdfPath: adminFormPdfPath }), /separate files/);
+  await assert.rejects(sendAdmissionEmails({ ...base, adminFormPdfPath: studentPdfPath, studentPdfPath: adminFormPdfPath }), /intended recipients/);
+  await assert.rejects(sendAdmissionEmails({ ...base, adminFormPdfPath: adminDocumentsPdfPath, adminDocumentsPdfPath: adminFormPdfPath }), /intended recipients/);
+  await fs.copyFile(adminDocumentsPdfPath, studentPdfPath);
+  await assert.rejects(sendAdmissionEmails(base), /different content/);
+  await fs.copyFile(adminFormPdfPath, studentPdfPath);
   await assert.rejects(sendAdmissionEmails(base), /different content/);
   assert.equal(messages.length, 0);
 });
