@@ -61,6 +61,7 @@ test("dry run captures every scenario through the real queue without Google, led
 
   assert.deepEqual(failed, []);
   assert.deepEqual(calls, []);
+  assert.ok(results.every(result => result.checks.some(check => check.label.startsWith("fixture uploads pass server upload validation") && check.pass)));
   assert.deepEqual(results.map(result => [result.name, result.form.applicationId]), [["indian", "SKY-GS-TEST-0001"], ["foreign", "SKY-GS-TEST-0002"], ["unreadable", "SKY-GS-TEST-0003"]]);
   assert.equal(brevo.TransactionalEmailsApi.prototype.sendTransacEmail, originalSend, "Brevo transport restored");
   assert.equal(brevo.AccountApi.prototype.getAccount, originalAccount, "Brevo verification restored");
@@ -80,6 +81,8 @@ test("dry run captures every scenario through the real queue without Google, led
     }
     const job = await fs.readdir(path.join(root, scenario, "job"));
     assert.ok(job.some(name => name.endsWith("_Admin_Form.pdf")) && job.some(name => name.endsWith("_Student_Copy.pdf")), "PDFs are generated in the job directory");
+    const imageExtension = scenario === "foreign" ? ".png" : ".jpg";
+    assert.deepEqual(["photo", "signature", "parentSignature"].map(field => job.includes(field + imageExtension)), [true, true, true], `${scenario} uploads ${imageExtension} images`);
   }
 });
 

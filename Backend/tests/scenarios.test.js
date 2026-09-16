@@ -11,6 +11,7 @@ const { SAMPLE_DOCUMENTS, extractText, sampleDocument } = require("./pdfFixtures
 const { pathToFileURL } = require("node:url");
 const { normalizeAdmission } = require("../services/admissionContract");
 const { validateFileMetadata } = require("../services/uploadService");
+const { IMAGE_RULES, IMAGE_TYPE_FORMATS, IMAGE_EXTENSION_FORMATS, checkImageDimensions } = require("../services/imageRules");
 const { ADMISSION_HEADERS, admissionRow } = require("../services/admissionSheet");
 const generatePDF = require("../services/pdfGenerator");
 const email = require("../services/emailService");
@@ -205,9 +206,30 @@ test("29-31 oversized upload, invalid document type and invalid image type are r
   const imageAsDocument = { ...allFiles(), marksheet12: new File(["x"], "m12.jpg", { type: "image/jpeg" }) };
   assert.match(frontendErrors(baseForm(), imageAsDocument).marksheet12, /PDF/);
   assert.throws(() => validateFileMetadata({ fieldname: "marksheet12", mimetype: "image/jpeg", originalname: "m12.jpg" }), /PDF/);
-  const pngPhoto = { ...allFiles(), photo: new File(["x"], "photo.png", { type: "image/png" }) };
-  assert.match(frontendErrors(baseForm(), pngPhoto).photo, /JPG/);
-  assert.throws(() => validateFileMetadata({ fieldname: "photo", mimetype: "image/png", originalname: "photo.png" }), /JPG/);
+  const gifPhoto = { ...allFiles(), photo: new File(["x"], "photo.gif", { type: "image/gif" }) };
+  assert.match(frontendErrors(baseForm(), gifPhoto).photo, /JPG, JPEG or PNG/);
+  assert.throws(() => validateFileMetadata({ fieldname: "photo", mimetype: "image/gif", originalname: "photo.gif" }), /JPG\/JPEG\/PNG/);
+  const mismatched = { ...allFiles(), signature: new File(["x"], "signature.png", { type: "image/jpeg" }) };
+  assert.match(frontendErrors(baseForm(), mismatched).signature, /JPG, JPEG or PNG/);
+  assert.throws(() => validateFileMetadata({ fieldname: "signature", mimetype: "image/jpeg", originalname: "signature.png" }), /JPG\/JPEG\/PNG/);
+  const pngImages = { ...allFiles(), photo: new File(["x"], "photo.PNG", { type: "image/png" }), parentSignature: new File(["x"], "parent.png", { type: "image/png" }) };
+  assert.deepEqual(frontendErrors(baseForm(), pngImages), {});
+  assert.doesNotThrow(() => validateFileMetadata({ fieldname: "photo", mimetype: "image/png", originalname: "photo.PNG" }));
+});
+
+test("frontend and backend photo/signature rules are identical", () => {
+  for (const [name, rule] of Object.entries(IMAGE_RULES)) {
+    const frontend = ui.UPLOAD_FIELDS[name];
+    assert.deepEqual({ dimensionLabel: frontend.dimensionLabel, width: frontend.width, height: frontend.height, tolerancePx: frontend.tolerancePx }, rule, name);
+    assert.deepEqual(frontend.types, IMAGE_TYPE_FORMATS, `${name} MIME types`);
+    assert.deepEqual(frontend.extensions, IMAGE_EXTENSION_FORMATS, `${name} extensions`);
+  }
+  assert.deepEqual(Object.entries(ui.UPLOAD_FIELDS).filter(([, rule]) => rule.width).map(([name]) => name), Object.keys(IMAGE_RULES));
+  for (const [width, height] of [[413, 531], [600, 800], [300, 150], [500, 200], [531, 413]]) {
+    for (const name of Object.keys(IMAGE_RULES)) {
+      assert.deepEqual(ui.checkImageDimensions(width, height, ui.UPLOAD_FIELDS[name]), checkImageDimensions(width, height, IMAGE_RULES[name]), `${name} ${width}x${height} message`);
+    }
+  }
 });
 
 test("32-33 missing conditional fields/uploads and an unchecked declaration are rejected by frontend and backend", () => {

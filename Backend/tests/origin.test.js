@@ -28,7 +28,9 @@ function request(port, { method = "GET", pathname, headers = {}, body }) {
 
 test("ALLOWED_ORIGINS and reCAPTCHA hostnames restrict the new Ground School host", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "skypro-origin-test-"));
-  const jpeg = await sharp({ create: { width: 40, height: 20, channels: 3, background: "white" } }).jpeg().toBuffer();
+  // Sized to the upload rules: photo 413 × 531 px, signatures 300 × 150 px.
+  const jpegOf = (width, height) => sharp({ create: { width, height, channels: 3, background: "white" } }).jpeg().toBuffer();
+  const jpegs = { photo: await jpegOf(413, 531), signature: await jpegOf(300, 150), parentSignature: await jpegOf(300, 150) };
   const pdfDoc = await PDFDocument.create(); pdfDoc.addPage();
   const pdf = await pdfDoc.save();
   const jobs = [];
@@ -47,8 +49,8 @@ test("ALLOWED_ORIGINS and reCAPTCHA hostnames restrict the new Ground School hos
     const body = validBody();
     Object.entries(body).forEach(([key, value]) => form.append(key, value));
     filesFor(body).forEach(({ fieldname }) => {
-      const image = ["photo", "signature", "parentSignature"].includes(fieldname);
-      form.append(fieldname, new Blob([image ? jpeg : pdf], { type: image ? "image/jpeg" : "application/pdf" }), image ? "image.jpg" : "document.pdf");
+      const image = jpegs[fieldname];
+      form.append(fieldname, new Blob([image || pdf], { type: image ? "image/jpeg" : "application/pdf" }), image ? "image.jpg" : "document.pdf");
     });
     const encoded = new Request("http://local/", { method: "POST", body: form });
     return request(port, { method: "POST", pathname: "/api/submit", headers: { Origin: origin, "Content-Type": encoded.headers.get("content-type") }, body: Buffer.from(await encoded.arrayBuffer()) });

@@ -8,6 +8,15 @@ test("400 validation errors keep the server message and map fields to frontend n
   assert.deepEqual(feedback.fields, { dob: "Enter a valid date (YYYY-MM-DD)", individualSubjects: "Provide a JSON array with at least one listed subject", courseSelection: "Course must match courseSelection" });
 });
 
+test("server image dimension errors are shown on the photo and signature fields", () => {
+  const message = "Photo must be exactly 413 × 531 px. Your image is 600 × 800 px. Please resize it using Reduce Images.";
+  const signature = "Signature must be exactly 300 × 150 px. Your image is 500 × 200 px. Please resize it using Reduce Images.";
+  const parent = "Parent's signature must be exactly 300 × 150 px. Your image is 150 × 300 px. Please resize it using Reduce Images.";
+  const feedback = submissionFeedback({ response: { status: 400, data: { error: message, fields: { photo: message, signature, parentSignature: parent } } } });
+  assert.equal(feedback.message, message);
+  assert.deepEqual(feedback.fields, { photo: message, signature, parentSignature: parent });
+});
+
 test("network, timeout and server failures give safe messages without internal details", () => {
   assert.match(submissionFeedback(new Error("Network Error")).message, /could not reach/);
   assert.match(submissionFeedback({ code: "ECONNABORTED" }).message, /took too long/);

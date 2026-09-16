@@ -16,6 +16,7 @@ const { PDFDocument } = require("pdf-lib");
 const { createQueue } = require("../services/queueService");
 const generatePDF = require("../services/pdfGenerator");
 const sendAdminEmail = require("../services/emailService");
+const { validateFileContents } = require("../services/uploadService");
 const { SCENARIOS: PDF_SCENARIOS, admissionFromBody, extractText } = require("../tests/pdfFixtures");
 const { validBody } = require("../tests/fixtures");
 
@@ -34,10 +35,11 @@ const indianBody = extra => validBody({
   hasEgcaId: "Yes", egcaId: "EGCA-100201", hasDgcaMedical: "Yes", dgcaMedicalClass: "DGCA Class-2 Medical", ...extra,
 });
 
-// Fictional applicants; `unreadable` replaces every uploaded PDF with invalid bytes.
+// Fictional applicants; `foreign` uploads PNG photo and signatures (the others JPEG) and
+// `unreadable` replaces every uploaded PDF with invalid bytes after upload validation.
 const SCENARIOS = {
   indian: { applicationId: "SKY-GS-TEST-0001", body: indianBody() },
-  foreign: { applicationId: "SKY-GS-TEST-0002", body: PDF_SCENARIOS["foreign-individual-dgca"].body },
+  foreign: { applicationId: "SKY-GS-TEST-0002", body: PDF_SCENARIOS["foreign-individual-dgca"].body, imageFormat: "png" },
   unreadable: { applicationId: "SKY-GS-TEST-0003", body: indianBody({ fullName: "Kabir Mehta" }), unreadable: true },
 };
 
@@ -186,10 +188,11 @@ async function writeRecipient(directory, message) {
 
 const rangesIn = text => [...text.matchAll(/In Documents PDF - pages? (\d+)(?:-(\d+))?/g)].map(match => [Number(match[1]), Number(match[2] || match[1])]);
 
-function checkScenario(name, { form, admin, student, run }) {
+function checkScenario(name, { form, admin, student, run, uploadError }) {
   const checks = [];
   const check = (label, pass, detail = "") => checks.push({ scenario: name, label, pass: Boolean(pass), detail });
   const id = form.applicationId;
+  check("fixture uploads pass server upload validation (type, content, dimensions)", !uploadError, uploadError);
   check("queue job completed without errors", !run.errors.length, run.errors.join("; "));
   check("Google Sheets stage reached once and stubbed (no Sheets call)", run.sheetsSkipped === 1, `${run.sheetsSkipped} calls`);
   if (!admin || !student) {
@@ -247,8 +250,9 @@ async function runScenario(name, { send, to, local, outputRoot }) {
   const jobDir = path.join(scenarioDir, "job");
   await fs.rm(scenarioDir, { recursive: true, force: true });
   await fs.mkdir(jobDir, { recursive: true });
-  const { body, applicationId, unreadable } = SCENARIOS[name];
-  const { form, files } = await admissionFromBody(body, applicationId, jobDir);
+  const { body, applicationId, unreadable, imageFormat } = SCENARIOS[name];
+  const { form, files } = await admissionFromBody(body, applicationId, jobDir, { imageFormat });
+  const uploadError = await validateFileContents(files).then(() => "", error => error.message);
   if (unreadable) for (const file of files.filter(upload => upload.mimetype === "application/pdf")) await fs.writeFile(file.path, "not a pdf");
   if (send) form.email = to;
   if (local) form.email = LOCAL_RECIPIENTS.student;
@@ -268,7 +272,7 @@ async function runScenario(name, { send, to, local, outputRoot }) {
     if (local) await deliverLocal(local.transport, local.smtp, role, message);
     recipients[role] = { message, ...(await writeRecipient(path.join(scenarioDir, role), message)) };
   }
-  const checks = checkScenario(name, { form, admin: recipients.admin, student: recipients.student, run });
+  const checks = checkScenario(name, { form, admin: recipients.admin, student: recipients.student, run, uploadError });
   if (local) {
     for (const role of ["admin", "student"]) {
       const accepted = recipients[role]?.message.sentAs?.accepted || [];

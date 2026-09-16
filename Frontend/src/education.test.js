@@ -76,7 +76,7 @@ test("Aadhaar is Indian-only; foreigners require a passport instead and hidden f
   for (const key of ["marksheet10", "marksheet12"]) assert.equal(foreignPayload.getAll(key).length, 1);
 });
 
-test("central upload validation enforces PDF/JPEG MIME, legacy image/jpg compatibility, and byte limits", () => {
+test("central upload validation enforces PDF/JPEG/PNG MIME, legacy image/jpg compatibility, and byte limits", () => {
   for (const key of ["marksheet10", "marksheet12", "aadhar"]) {
     assert.equal(validateUpload({ name: "document.pdf", type: "application/pdf", size: MAX_UPLOAD_BYTES }, key), "");
     assert.ok(validateUpload({ name: "document.pdf", type: "application/pdf", size: MAX_UPLOAD_BYTES + 1 }, key));
@@ -86,7 +86,8 @@ test("central upload validation enforces PDF/JPEG MIME, legacy image/jpg compati
   for (const key of ["photo", "signature", "parentSignature"]) {
     assert.equal(validateUpload({ name: "image.jpeg", type: "image/jpeg", size: MAX_UPLOAD_BYTES }, key), "");
     assert.equal(validateUpload({ name: "image.jpg", type: "image/jpg", size: 100 }, key), "");
-    assert.ok(validateUpload({ name: "image.png", type: "image/png", size: 100 }, key));
+    assert.equal(validateUpload({ name: "image.png", type: "image/png", size: 100 }, key), "");
+    assert.ok(validateUpload({ name: "image.gif", type: "image/gif", size: 100 }, key));
     assert.ok(validateUpload({ name: "image.jpeg", type: "image/jpeg", size: MAX_UPLOAD_BYTES + 1 }, key));
   }
 });

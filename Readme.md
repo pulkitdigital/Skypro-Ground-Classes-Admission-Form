@@ -49,7 +49,7 @@ Request flow:
 | Frontend | React 19.2, Vite 7.2, Tailwind CSS 4.1 (`@tailwindcss/vite`), Axios 1.13, `libphonenumber-js` 1.13, `react-icons` 5.5 (footer) |
 | Frontend tooling | ESLint 9 with React Hooks and React Refresh plugins; tests use the built-in `node:test` runner |
 | API | Node.js, Express 5.2, `cors`, Multer 2, `dotenv`, Axios 1.20 |
-| Validation | `libphonenumber-js` (phones), `sharp` (JPEG decoding), `pdf-lib` (PDF parsing) |
+| Validation | `libphonenumber-js` (phones), `sharp` (JPEG/PNG decoding, dimensions, PNG conversion for the PDF), `pdf-lib` (PDF parsing) |
 | PDF | PDFKit 0.17 (form), pdf-lib 1.17 (attachment merge) |
 | Email | Brevo transactional API (`@getbrevo/brevo` 3) |
 | Records and IDs | Google Sheets API v4 via `googleapis` (service account) |
@@ -58,7 +58,7 @@ Request flow:
 
 Node.js: Vite 7 requires Node 20.19+ or 22.12+. The project was last verified with Node 24.18. The backend tests use the global `File`, `FormData`, and `Blob` classes.
 
-Declared but not imported by the current backend code: `puppeteer`, `nodemailer`, `@sendinblue/client`, `image-size`.
+Declared but not imported by the backend server code: `puppeteer`, `@sendinblue/client`, `image-size`. `nodemailer` is used only by the testing script `scripts/previewEmails.js`.
 
 ## Project structure
 
@@ -80,7 +80,7 @@ Skypro Ground Classes Form/
 │   │   ├── AviationWorkflow.jsx      # 5. Aviation Background (DGCA, eGCA, medical)
 │   │   ├── DeclarationDetails.jsx    # 6. Declaration & Undertaking (+ signatures)
 │   │   ├── UploadField.jsx, ThankYouPopup.jsx
-│   │   ├── formState.js              # Defaults, drafts, upload rules, multipart builder
+│   │   ├── formState.js              # Defaults, drafts, upload and image-dimension rules, multipart builder
 │   │   ├── studentDetailsModel.js, contactModel.js, educationModel.js,
 │   │   ├── enrollmentModel.js, aviationWorkflowModel.js
 │   │   ├── submissionFeedback.js     # API error → message and field errors
@@ -96,6 +96,7 @@ Skypro Ground Classes Form/
     ├── services/
     │   ├── admissionContract.js      # Text/conditional validation and normalization
     │   ├── uploadService.js          # Multer config, file checks, directory cleanup/purge
+    │   ├── imageRules.js             # Photo/signature dimensions, JPEG/PNG types (mirrors formState.js)
     │   ├── applicationIdService.js   # SKY-GS-YYYY-MM-NNNN allocation (Sheets ledger + lock)
     │   ├── queueService.js           # In-memory job queue
     │   ├── pdfGenerator.js           # Admin/student PDF rendering and attachment merge
@@ -330,8 +331,8 @@ The backend resolves the final emergency contact as `{ source, name, relationshi
 | `declarationAccepted` | I confirm that I have read, understood, and agree to the above Declaration & Undertaking. | Required | — | `true` | Must be the literal string `true` |
 | `declarationStudentName` | Student Full Name (read-only) | Sent automatically | — | Copy of `fullName` | Ignored; backend uses `fullName` |
 | `declarationDate` | Date (read-only, today) | Sent automatically | — | Browser-local date | Ignored; backend uses today's date in Asia/Kolkata |
-| `signature` (file) | Student's Signature (JPG or JPEG) | Required | — | JPEG | See file requirements |
-| `parentSignature` (file) | Parent's Signature (JPG or JPEG) | Required | — | JPEG | See file requirements |
+| `signature` (file) | Student's Signature (JPG, JPEG or PNG) | Required | — | JPEG or PNG, exactly 300 × 150 px | See file requirements |
+| `parentSignature` (file) | Parent's Signature (JPG, JPEG or PNG) | Required | — | JPEG or PNG, exactly 300 × 150 px | See file requirements |
 | `recaptchaToken` | reCAPTCHA checkbox | Required | — | Widget token | Nonempty, ≤8192 characters, verified with Google |
 
 The section shows five declaration paragraphs (the same text is printed in the admin PDF from `pdfGenerator.js`).
@@ -340,28 +341,43 @@ The section shows five declaration paragraphs (the same text is printed in the a
 
 | Request key | Label | Section | Format | Required when |
 | --- | --- | --- | --- | --- |
-| `photo` | Passport Size Photo (JPG or JPEG) | 1 | JPEG | Always |
+| `photo` | Passport Size Photo (JPG, JPEG or PNG) | 1 | JPEG or PNG, exactly 413 × 531 px (35mm × 45mm at 300 DPI) | Always |
 | `passport` | Upload Passport (PDF) | 1 (Foreign National Details) | PDF | `nationality = Foreign National` |
 | `marksheet10` | Upload Class-10th Marksheet (PDF) | 3 | PDF | Always |
 | `marksheet12` | Upload Class-12th Marksheet (PDF) | 3 | PDF | Always |
 | `aadhar` | Upload Aadhaar Card (PDF) | 3 | PDF | `nationality = Indian National` |
 | `dgcaExamResult` | Upload DGCA Examination Result (PDF) | 5B | PDF | Computer number `Yes` and papers cleared `Yes` |
 | `dgcaMedicalAssessment` | Upload DGCA Medical Assessment (PDF) | 5D | PDF | eGCA `Yes` and medical `Yes` |
-| `signature` | Student's Signature (JPG or JPEG) | 6 | JPEG | Always |
-| `parentSignature` | Parent's Signature (JPG or JPEG) | 6 | JPEG | Always |
+| `signature` | Student's Signature (JPG, JPEG or PNG) | 6 | JPEG or PNG, exactly 300 × 150 px | Always |
+| `parentSignature` | Parent's Signature (JPG, JPEG or PNG) | 6 | JPEG or PNG, exactly 300 × 150 px | Always |
 
 ## File upload requirements
 
-| Check | Browser (`formState.js`, `form.jsx`) | Server (`uploadService.js`, `admissionContract.js`) |
+| Check | Browser (`formState.js`, `form.jsx`) | Server (`uploadService.js`, `imageRules.js`, `admissionContract.js`) |
 | --- | --- | --- |
 | Allowed fields | Only visible upload inputs are sent | Only the nine keys above; one file per key; files for non-applicable branches are rejected; applicable files are required |
 | Type (documents) | MIME `application/pdf` and `.pdf` extension | MIME `application/pdf` and `.pdf` extension (case-insensitive); content must start with `%PDF-`, load in pdf-lib, be unencrypted, and have at least one page |
-| Type (photo, signatures) | MIME `image/jpeg` or `image/jpg` and `.jpg`/`.jpeg` extension; the image must decode in the browser | Same MIME/extension rule; content must start with the JPEG signature and fully decode with sharp (JPEG format, at most 40 megapixels) |
+| Type (photo, signatures) | MIME `image/jpeg`, `image/jpg` or `image/png` with extension `.jpg`, `.jpeg` or `.png` (case-insensitive); MIME and extension must name the same format (a `.png` file must be `image/png`). The image must decode in the browser | Same MIME/extension rule; content must start with the JPEG signature (`FF D8 FF`) or PNG signature (`89 50 4E 47 0D 0A 1A 0A`) matching the extension, fully decode with sharp, sharp's detected format must match the extension, at most 40 megapixels |
+| Dimensions (photo, signatures) | Checked when the file is selected (decoded with `createImageBitmap(file, { imageOrientation: "from-image" })`, falling back to `Image`) and again at submit. A failing file is not kept and the input is cleared | Width/height from sharp metadata, swapped for EXIF orientations 5–8, compared with the rule; failure returns 400 with `fields.<field>` set to the same message and deletes the upload directory |
 | Size | Nonempty, ≤ 2 × 1024 × 1024 bytes | Multer rejects files over 2 × 1024 × 1024 bytes; empty files are rejected |
 | File names | Not used | Saved as `<random UUID><lowercased extension>` in a per-request `uploads/admission-XXXXXX` directory; original names are never used on disk |
 | Multipart limits | — | At most 9 files, 100 text fields, 110 parts, 16 KB per text field, 100-byte field names |
 
-There are no pixel-dimension requirements.
+**Image dimension rules** (identical in `Frontend/src/formState.js` and `Backend/services/imageRules.js`; `scenarios.test.js` fails if they differ):
+
+| Field | Required size | `tolerancePx` |
+| --- | --- | --- |
+| `photo` | 413 × 531 px (35mm × 45mm at 300 DPI) | 0 (exact) |
+| `signature` | 300 × 150 px | 0 (exact) |
+| `parentSignature` | 300 × 150 px | 0 (exact) |
+
+The size after EXIF rotation is what counts. Browser checks run in this order: type, size (2 MB), decode, dimensions. To allow a margin later, change `tolerancePx` in both files (for example `2` accepts ±2 px per dimension; the message then reads "must be 413 × 531 px (±2 px)"). Error messages name the required and actual size, for example:
+
+- `Photo must be exactly 413 × 531 px. Your image is 600 × 800 px. Please resize it using Reduce Images.`
+- `Signature must be exactly 300 × 150 px. Your image is 500 × 200 px. Please resize it using Reduce Images.`
+- `Parent's signature must be exactly 300 × 150 px. Your image is 150 × 300 px. Please resize it using Reduce Images.`
+
+The upload help text and the Important Instructions box link to [Reduce Images](https://www.reduceimages.com/).
 
 ## Conditional dependency tree
 
@@ -534,7 +550,7 @@ The files are written inside the job upload directory and cleaned with that dire
 | Final Course Fee Payable, Registration Amount Received, Full Fee Received | Blank box with `INR` prefix |
 | Registration Payment Date, Final Payment Date, Date | Blank box with `DD / MM / YYYY` guide |
 
-**Supporting documents** (in this order): Aadhaar, Passport, Class 10 Marksheet, Class 12 Marksheet, DGCA Exam Result, DGCA Medical Assessment. Only applicable documents are included, and their pages are copied unmodified (no stamping or resizing). Photo and signatures are embedded in the form, not appended. An unreadable document does not stop generation; it is listed as not appended.
+**Supporting documents** (in this order): Aadhaar, Passport, Class 10 Marksheet, Class 12 Marksheet, DGCA Exam Result, DGCA Medical Assessment. Only applicable documents are included, and their pages are copied unmodified (no stamping or resizing). Photo and signatures are embedded in the form, not appended. JPEG uploads are embedded as uploaded. PNG uploads (including 16-bit, interlaced, palette and alpha variants) are converted in memory with sharp to an 8-bit RGB PNG flattened onto white before embedding, so transparent signatures print on white; the uploaded file is not modified and the box sizes and layout are the same for both formats. An unreadable document does not stop generation; it is listed as not appended.
 
 - **Admin Documents PDF:** page 1 is a cover/index page ("SUPPORTING DOCUMENTS", student full name, SkyPro Application ID, submission time in IST, and a table with each applicable document's status or page range, using the same statuses as the form). The documents follow from page 2. If no document could be appended, this PDF is not generated.
 - **Student Copy:** the documents are appended directly after the form pages.
@@ -675,7 +691,7 @@ The same spreadsheet also holds the `GroundSchoolApplicationIDs` ledger tab (see
 **Implemented controls.**
 
 - Complete server-side validation of every text field, choice, date, phone, email, and conditional rule, independent of the browser; unknown, duplicated, or obsolete fields are rejected; hidden dependent values are dropped.
-- Upload allowlist per field and branch, one file each, MIME and extension match, content verification (PDF parsing, JPEG decoding with a pixel limit), 2 MB limit, multipart count/size limits.
+- Upload allowlist per field and branch, one file each, MIME and extension match, content verification (PDF parsing; JPEG/PNG signature, full sharp decode with a 40-megapixel limit, and exact photo/signature dimensions after EXIF rotation), 2 MB limit, multipart count/size limits.
 - Random server-side file names; original file names are never used as paths; cleanup refuses directories outside `uploads/admission-*`.
 - Rejected requests delete their upload directory before responding, including reCAPTCHA failures; stale request directories are purged after 24 hours.
 - reCAPTCHA verification with the secret in the POST body, optional hostname allowlist, and token length limit.
@@ -696,7 +712,7 @@ The same spreadsheet also holds the `GroundSchoolApplicationIDs` ledger tab (see
 - Passport expiry and DGCA exam result dates are not checked against today.
 - Repository hygiene: `Frontend/.env` is tracked (public values only). The `Backend` git history contains previously committed files under `uploads/` (legacy admission PDFs); ignoring the folder does not remove them from history.
 
-**Known dead code.** `services/convertImageToPdf.js` is fully commented out; `test-converter.js` imports a non-existent path; `pdfGenerator.js` contains an unused `MONTHS` constant; `form.jsx` and `UploadField.jsx` still contain image-dimension branches that never run because no dimension rules are configured.
+**Known dead code.** `services/convertImageToPdf.js` is fully commented out; `test-converter.js` imports a non-existent path; `pdfGenerator.js` contains an unused `MONTHS` constant.
 
 ## Commands
 
@@ -725,23 +741,23 @@ Invoke-RestMethod http://localhost:5000/api/queue-status
 
 ## Testing
 
-**Backend (`npm test`, 58 tests).** Google Sheets, Brevo, and reCAPTCHA are replaced by in-process fakes or mocks; no email is sent and no spreadsheet is written.
+**Backend (`npm test`, 66 tests).** Google Sheets, Brevo, and reCAPTCHA are replaced by in-process fakes or mocks; no email is sent and no spreadsheet is written.
 
 | File | Covers |
 | --- | --- |
-| `scenarios.test.js` | Cross-stack matrix: imports the real frontend models from `Frontend/src`, builds the multipart payload for each scenario, and runs it through the backend contract, Sheets row, PDF sections, admin Documents PDF, and email builders — nationality switch, computer number Yes/No/Applied, papers Yes/No, eGCA Yes/No, medical Class 1/Class 2/No, Other qualification, all Physics/Mathematics options, Jaipur Yes/No, every emergency source, package/one/multiple subjects, Online/Offline, same/independent address, invalid uploads, missing conditional fields, unchecked declaration, Application ID visibility, and stale hidden fields |
+| `scenarios.test.js` | Cross-stack matrix: imports the real frontend models from `Frontend/src`, builds the multipart payload for each scenario, and runs it through the backend contract, Sheets row, PDF sections, admin Documents PDF, and email builders — nationality switch, computer number Yes/No/Applied, papers Yes/No, eGCA Yes/No, medical Class 1/Class 2/No, Other qualification, all Physics/Mathematics options, Jaipur Yes/No, every emergency source, package/one/multiple subjects, Online/Offline, same/independent address, invalid uploads (GIF, MIME/extension mismatch, PNG accepted), identical frontend/backend image rules and messages, missing conditional fields, unchecked declaration, Application ID visibility, and stale hidden fields |
 | `contract.test.js` | Backend validation rules and derived values |
-| `api.test.js` | Real multipart requests: rejected inputs and uploads with cleanup, reCAPTCHA failures, allocation and queue failures, successful submission without ID in response |
+| `api.test.js` | Real multipart requests: rejected inputs and uploads with cleanup (including a wrong-size PNG photo with its field error), JPEG and PNG images accepted, reCAPTCHA failures, allocation and queue failures, successful submission without ID in response |
 | `origin.test.js` | CORS allowlist, 403 origin rejection, reCAPTCHA hostname check |
 | `applicationId.test.js` | Concurrent allocation, restarts, monthly/yearly rollover, lost responses, stuck and released locks, corrupted ledger |
-| `pdf.test.js` | Real PDF generation: admin Form PDF without appended pages and with form-only footer totals, Documents PDF cover and document order, page ranges matching between form and cover, unreadable/missing uploads, no Documents PDF when nothing is appendable, unchanged Student Copy, office fields |
+| `pdf.test.js` | Real PDF generation: JPEG images embedded unchanged, PNG photo and transparent PNG signatures (and 16-bit, interlaced, palette, grayscale-alpha PNGs) embedded as 8-bit images on white in the admin form and student copy without modifying the upload, admin Form PDF without appended pages and with form-only footer totals, Documents PDF cover and document order, page ranges matching between form and cover, unreadable/missing uploads, no Documents PDF when nothing is appendable, unchanged Student Copy, office fields |
 | `email.test.js` | Admin/student templates, admin Form + Documents attachments (names and order), Form-only admin email with a note, no internal data and only the Student Copy for the student, per-recipient retry |
 | `sheet.test.js` | Column letters, row mapping, formula escaping, tab creation, header verification, duplicate skip |
 | `previewEmails.test.js` | Email preview script: dry run of all scenarios with Google, ledger, Sheets, `fetch`, HTTP and sockets stubbed to throw; output files; `--smtp-local` with a mocked nodemailer transport (2 mails per scenario, local recipients, `[LOCAL]` prefix, attachment names/order/type, no Brevo key or Brevo call, Mailpit hint, local-host guard); send mode overriding recipients with the `[TEST]` prefix; argument and `--to` safety |
 | `queue.test.js` | Stage retries, regenerating only a missing admin PDF, cleanup of all PDFs on success and exhaustion, public status shape |
-| `upload.test.js` | Stale directory purge, MIME/extension rules |
+| `upload.test.js` | Stale directory purge, MIME/extension rules (JPEG/PNG, mismatch, GIF/WebP), exact and tolerant dimension checks, valid JPEG/PNG (including EXIF-rotated) accepted, wrong/swapped/EXIF-rotated sizes, fake PNG and format mismatches rejected with field errors, all sample fixtures pass upload validation |
 
-**Frontend (`node --test "src/*.test.js"`, 40 tests).** Model tests for student details (age, phones, addresses, nationality, drafts, upload rules, multipart), contacts, education, enrollment, aviation workflow, declaration, and API error mapping.
+**Frontend (`node --test "src/*.test.js"`, 47 tests).** Model tests for student details (age, phones, addresses, nationality, drafts, upload rules, multipart), image uploads (exact 413 × 531 / 300 × 150 rules, ±1 px and swapped sizes, messages, JPG/JPEG/PNG accepted, MIME/extension mismatch, GIF/WebP rejected, unreadable images, submit-time recheck), contacts, education, enrollment, aviation workflow, declaration, and API error mapping (including image field errors).
 
 **Not automated.** Live Brevo delivery, live Google Sheets writes and ID ledger, live reCAPTCHA verification, and a real browser submission against a running backend. Verify these in staging with test recipients and a test spreadsheet (see [Production deployment](#production-deployment)).
 
@@ -793,7 +809,7 @@ Add `groundschool.skyproaviation.org` to the domain list of the reCAPTCHA site w
 | 403 "must be submitted from the SkyPro Ground School website" | Add the exact frontend origin (scheme + host, no path) to `ALLOWED_ORIGINS` |
 | Browser cannot reach the API / CORS error | Backend running, `VITE_API_URL` correct and rebuilt, origin in `ALLOWED_ORIGINS`, HTTPS valid |
 | Field error "Use plain text, maximum 254 characters" | Remove `<`/`>` or shorten the value (2000 for addresses) |
-| Photo or signature rejected | Readable JPG/JPEG with `.jpg`/`.jpeg` extension, at most 2 MB |
+| Photo or signature rejected | Readable JPG, JPEG or PNG whose extension matches its real format (`.png` must really be PNG), at most 2 MB, and exactly 413 × 531 px (photo) or 300 × 150 px (signatures) as displayed after EXIF rotation. The error shows the image's actual size; resize with [Reduce Images](https://www.reduceimages.com/) and choose the file again |
 | Document rejected | Readable, unencrypted PDF with `.pdf` extension, at most 2 MB |
 | Submission returns 503 | Application ID allocation failed: check `SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, service-account editor access, quota, or a stuck lock (`node scripts/applicationIdLock.js status YYYY-MM`) |
 | Success message but no email or sheet row | Check server logs for queue failures (3 attempts, then discarded); verify Brevo and Google settings |

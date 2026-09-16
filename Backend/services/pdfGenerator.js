@@ -3,6 +3,7 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const PDFDocument = require("pdfkit");
 const { PDFDocument: PDFLib } = require("pdf-lib");
+const sharp = require("sharp");
 const { formatDate, formatDateTime, phone } = require("./formatting");
 
 const PAGE_WIDTH = 595.28;
@@ -290,7 +291,7 @@ function documentsCover(doc, form, results, totalPages) {
 
 // The student form is followed by its appended documents (`appendedPageCount`); the admin
 // form stands alone and points to page ranges in the separate Documents PDF.
-function layout(doc, form, files, attachments, { audience, appendedPageCount }) {
+function layout(doc, form, files, attachments, { audience, appendedPageCount, images = {} }) {
   const admin = audience === "admin";
   const { top, bottom, branding, measure, write, rule, rowHeight, labelRow, copyBadge, pageFooter } = pageKit(doc);
   let y = top;
@@ -304,9 +305,8 @@ function layout(doc, form, files, attachments, { audience, appendedPageCount }) 
 
   function imageBox(field, x, atY, width, height, placeholder) {
     doc.rect(x, atY, width, height).lineWidth(1).strokeColor(COLOR.navy).stroke();
-    const file = files.find(candidate => candidate.fieldname === field);
-    if (file?.path && fs.existsSync(file.path)) {
-      try { doc.image(file.path, x + 4, atY + 4, { fit: [width - 8, height - 8], align: "center", valign: "center" }); return; }
+    if (images[field]) {
+      try { doc.image(images[field], x + 4, atY + 4, { fit: [width - 8, height - 8], align: "center", valign: "center" }); return; }
       catch (error) { console.error(`Could not embed ${field} in admission PDF:`, error.message); }
     }
     write(placeholder, x + 4, atY + height / 2 - 5, { size: 8, color: COLOR.muted, width: width - 8, align: "center" });
@@ -477,6 +477,27 @@ function layout(doc, form, files, attachments, { audience, appendedPageCount }) 
   }
 }
 
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+// Image sources for the photo and signature boxes. JPEGs are embedded from disk as
+// before. PDFKit cannot embed every PNG variant (16-bit, interlaced, palette, alpha),
+// so each PNG is re-encoded in memory as a plain 8-bit RGB PNG, flattened onto white
+// so transparent signatures print cleanly. The uploaded file is never modified.
+async function prepareImages(files) {
+  const images = {};
+  for (const [field] of EMBEDDED_UPLOADS) {
+    const file = files.find(candidate => candidate.fieldname === field);
+    if (!file?.path || !fs.existsSync(file.path)) continue;
+    try {
+      const bytes = await fsp.readFile(file.path);
+      images[field] = bytes.subarray(0, 8).equals(PNG_SIGNATURE)
+        ? await sharp(bytes).rotate().flatten({ background: "#ffffff" }).toColourspace("srgb").png({ progressive: false, palette: false }).toBuffer()
+        : file.path;
+    } catch (error) { console.error(`Could not prepare ${field} for admission PDF:`, error.message); }
+  }
+  return images;
+}
+
 const ADMIN_PARTS = ["form", "documents"];
 
 // Student: one PDF, form followed by the appended documents.
@@ -499,7 +520,8 @@ async function generatePDF(formData, uploadedFiles = [], outputDirectory, option
     // Page ranges come from the merge, so they are known before the form is rendered.
     const { bundle, results } = await prepareAttachments(formData, files);
     const appendedPageCount = audience === "student" ? bundle.getPageCount() : 0;
-    output = await PDFLib.load(await renderForm(formData, files, results, { audience, appendedPageCount }));
+    const images = await prepareImages(files);
+    output = await PDFLib.load(await renderForm(formData, files, results, { audience, appendedPageCount, images }));
     if (appendedPageCount) (await output.copyPages(bundle, bundle.getPageIndices())).forEach(page => output.addPage(page));
   }
 

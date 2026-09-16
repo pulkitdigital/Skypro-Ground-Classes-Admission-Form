@@ -20,13 +20,14 @@ test("Phase 7 draft restores applicant text but requires fresh acceptance of new
   assert.equal(draft.disclaimerAccepted, false);
 });
 
-test("both signatures are required and accept only nonempty JPEG uploads up to 2 MB", () => {
+test("both signatures are required and accept only nonempty JPEG or PNG uploads up to 2 MB", () => {
   const errors = validateFormUploads(normalizeForm(), {});
   for (const key of ["signature", "parentSignature"]) {
     assert.match(errors[key], /required/);
     assert.equal(validateUpload({ name: "signature.JPEG", type: "image/jpeg", size: MAX_UPLOAD_BYTES }, key), "");
     assert.match(validateUpload({ name: "signature.jpg", type: "image/jpeg", size: MAX_UPLOAD_BYTES + 1 }, key), /2 MB/);
-    assert.match(validateUpload({ name: "signature.png", type: "image/png", size: 10 }, key), /Only JPG or JPEG/);
+    assert.equal(validateUpload({ name: "signature.png", type: "image/png", size: 10 }, key), "");
+    assert.match(validateUpload({ name: "signature.webp", type: "image/webp", size: 10 }, key), /Only JPG, JPEG or PNG/);
     assert.match(validateUpload({ name: "signature.jpg", type: "image/jpeg", size: 0 }, key), /empty/);
   }
 });

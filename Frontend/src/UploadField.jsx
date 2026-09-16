@@ -1,8 +1,5 @@
-const IMAGE_HELP = {
-  photo: "Required dimensions: 413 x 531 pixels (35mm x 45mm at 300 DPI), JPG/JPEG/PNG only, Max 2MB.",
-  signature: "Required dimensions: 300 x 150 pixels, JPG/JPEG/PNG only, Max 2MB.",
-  parentSignature: "Required dimensions: 300 x 150 pixels, JPG/JPEG/PNG only, Max 2MB.",
-};
+// Built from the rule so the help text always shows the enforced dimensions.
+const imageHelp = (rule) => `Required dimensions: ${rule.width} x ${rule.height} pixels${rule.sizeNote ? ` (${rule.sizeNote})` : ""}, JPG/JPEG/PNG only, Max 2MB.`;
 
 export default function UploadField({ name, rule, file, error, pending, onChange }) {
   const inputId = `upload-${name}`;
@@ -23,9 +20,9 @@ export default function UploadField({ name, rule, file, error, pending, onChange
         onChange={onChange}
       />
       <p id={`${inputId}-help`} className="text-sm text-gray-600 mt-1">
-        {IMAGE_HELP[name] ? (
+        {rule.width ? (
           <>
-            {IMAGE_HELP[name]} If your image does not match these requirements, resize/compress it using{" "}
+            {imageHelp(rule)} If your image does not match these requirements, resize/compress it using{" "}
             <a href="https://www.reduceimages.com/" target="_blank" rel="noopener noreferrer nofollow" className="text-blue-600 hover:underline">Reduce Images</a>.
           </>
         ) : `${rule.formats} only. Maximum 2 MB.`}

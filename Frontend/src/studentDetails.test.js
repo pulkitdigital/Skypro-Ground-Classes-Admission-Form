@@ -87,10 +87,11 @@ test("draft restoration migrates old values, whitelists new fields, and handles 
 });
 
 test("passport and photo restrictions match the new specification", () => {
-  assert.equal(UPLOAD_FIELDS.photo.width, undefined);
-  assert.equal(UPLOAD_FIELDS.photo.height, undefined);
+  assert.equal(UPLOAD_FIELDS.photo.width, 413);
+  assert.equal(UPLOAD_FIELDS.photo.height, 531);
   assert.equal(validateUpload({ name: "photo.jpeg", type: "image/jpeg", size: 2 * 1024 * 1024 }, "photo"), "");
-  assert.ok(validateUpload({ name: "photo.png", type: "image/png", size: 100 }, "photo"));
+  assert.equal(validateUpload({ name: "photo.png", type: "image/png", size: 100 }, "photo"), "");
+  assert.ok(validateUpload({ name: "photo.gif", type: "image/gif", size: 100 }, "photo"));
   assert.ok(validateUpload({ name: "photo.jpeg", type: "image/jpeg", size: 2 * 1024 * 1024 + 1 }, "photo"));
   assert.equal(validateUpload({ name: "passport.pdf", type: "application/pdf", size: 100 }, "passport"), "");
   assert.ok(validateUpload({ name: "passport.jpg", type: "image/jpeg", size: 100 }, "passport"));

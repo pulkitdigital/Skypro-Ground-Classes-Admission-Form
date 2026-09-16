@@ -3,11 +3,23 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { PDFDocument } = require("pdf-lib");
+const { createHash } = require("node:crypto");
+const sharp = require("sharp");
+const { PDFDocument, PDFName, PDFRawStream } = require("pdf-lib");
 const generatePDF = require("../services/pdfGenerator");
 const { sampleAdmission, extractText, SAMPLE_DOCUMENTS } = require("./pdfFixtures");
 
 const A4_WIDTH = 595;
+
+// Image XObjects in a PDF, identified by pixel size (photo 413 × 531, signatures 300 × 150).
+async function embeddedImages(bytes) {
+  const pdf = await PDFDocument.load(bytes);
+  const value = (dict, key) => dict.get(PDFName.of(key));
+  return pdf.context.enumerateIndirectObjects().map(([, object]) => object)
+    .filter(object => object instanceof PDFRawStream && value(object.dict, "Subtype") === PDFName.of("Image"))
+    .map(({ dict }) => ({ size: `${value(dict, "Width").asNumber()}x${value(dict, "Height").asNumber()}`, bits: value(dict, "BitsPerComponent").asNumber(), filter: String(value(dict, "Filter")), transparent: dict.has(PDFName.of("SMask")) }));
+}
+const imagesOfSize = (images, size) => images.filter(image => image.size === size);
 
 async function setup(t, scenario, alter = async () => {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "skypro-pdf-test-"));
@@ -135,6 +147,58 @@ test("no Documents PDF is produced when no supporting document can be appended",
   assert.equal(adminForm.text.match(/could not be appended/g).length, 3);
   assert.equal(ranges(adminForm.text).length, 0);
   assertFormFooter(adminForm.text, adminForm.widths.length, form.applicationId);
+});
+
+test("JPEG photo and signatures are embedded unchanged in the admin form and student copy", async t => {
+  const { directory, form, files } = await setup(t, "indian-package");
+  for (const options of [{ copyType: "admin", part: "form" }, { copyType: "student" }]) {
+    const images = await embeddedImages(await fs.readFile(await generatePDF(form, files, directory, options)));
+    assert.deepEqual(imagesOfSize(images, "413x531").map(image => image.filter), ["/DCTDecode"], `${options.copyType} photo`);
+    assert.deepEqual(imagesOfSize(images, "300x150").map(image => image.filter), ["/DCTDecode", "/DCTDecode"], `${options.copyType} signatures`);
+  }
+});
+
+test("PNG photo and transparent PNG signatures are embedded on white in the admin form and student copy", async t => {
+  const { directory, form, files } = await setup(t, "indian-png-images");
+  const images = files.filter(file => file.mimetype === "image/png");
+  assert.deepEqual(images.map(file => file.fieldname).sort(), ["parentSignature", "photo", "signature"]);
+  assert.equal((await sharp(files.find(file => file.fieldname === "signature").path).metadata()).hasAlpha, true, "fixture signature is transparent");
+  const hashes = async () => Promise.all(images.map(async file => createHash("sha256").update(await fs.readFile(file.path)).digest("hex")));
+  const before = await hashes();
+  for (const options of [{ copyType: "admin", part: "form" }, { copyType: "student" }]) {
+    const bytes = await fs.readFile(await generatePDF(form, files, directory, options));
+    const text = extractText(bytes);
+    for (const placeholder of ["Photograph not available", "Student Signature not available", "Parent/Guardian Signature not available"]) assert.equal(text.includes(placeholder), false, `${options.copyType}: ${placeholder}`);
+    const embedded = await embeddedImages(bytes);
+    const photo = imagesOfSize(embedded, "413x531");
+    const signatures = imagesOfSize(embedded, "300x150");
+    assert.equal(photo.length, 1, `${options.copyType} photo`);
+    assert.equal(signatures.length, 2, `${options.copyType} signatures`);
+    for (const image of [...photo, ...signatures]) assert.deepEqual([image.bits, image.transparent], [8, false], "8-bit and flattened onto white");
+  }
+  assert.deepEqual(await hashes(), before, "uploaded files are not modified");
+});
+
+test("16-bit, interlaced, palette and grayscale-alpha PNG uploads are converted and embedded", async t => {
+  const { directory, form, files } = await setup(t, "indian-png-images");
+  const variants = {
+    photo: sharp({ create: { width: 413, height: 531, channels: 4, background: { r: 120, g: 150, b: 190, alpha: 1 } } }).toColourspace("rgb16").png(),
+    signature: sharp({ create: { width: 300, height: 150, channels: 4, background: { r: 20, g: 40, b: 90, alpha: 0.4 } } }).png({ progressive: true }),
+    parentSignature: sharp({ create: { width: 300, height: 150, channels: 4, background: { r: 20, g: 40, b: 90, alpha: 0.6 } } }).png({ palette: true, colours: 8 }),
+  };
+  for (const [field, image] of Object.entries(variants)) await fs.writeFile(files.find(file => file.fieldname === field).path, await image.toBuffer());
+  const metadata = await Promise.all(Object.keys(variants).map(field => sharp(files.find(file => file.fieldname === field).path).metadata()));
+  assert.deepEqual(metadata.map(item => [item.depth, item.isProgressive, item.isPalette]), [["ushort", false, false], ["uchar", true, false], ["uchar", false, true]]);
+  const grayscale = await sharp({ create: { width: 300, height: 150, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.5 } } }).toColourspace("b-w").png().toBuffer();
+  for (const options of [{ copyType: "admin", part: "form" }, { copyType: "student" }]) {
+    const embedded = await embeddedImages(await fs.readFile(await generatePDF(form, files, directory, options)));
+    assert.equal(imagesOfSize(embedded, "413x531").length, 1);
+    assert.equal(imagesOfSize(embedded, "300x150").length, 2);
+    assert.ok([...imagesOfSize(embedded, "413x531"), ...imagesOfSize(embedded, "300x150")].every(image => image.bits === 8 && !image.transparent));
+  }
+  await fs.writeFile(files.find(file => file.fieldname === "signature").path, grayscale);
+  const embedded = await embeddedImages(await fs.readFile(await generatePDF(form, files, directory, { copyType: "student" })));
+  assert.equal(imagesOfSize(embedded, "300x150").length, 2, "grayscale-alpha signature embedded");
 });
 
 test("office fields auto-populate ID, class mode and enrollment and leave administrative fields blank", async t => {

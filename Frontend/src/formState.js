@@ -35,21 +35,31 @@ const EMPTY_FORM = {
   ...AVIATION_DEFAULTS,
 };
 
-const PDF_RULE = { accept: "application/pdf", formats: "PDF", extensions: /\.pdf$/i, types: ["application/pdf"] };
-const JPEG_RULE = { accept: ".jpg,.jpeg,image/jpeg", formats: "JPG or JPEG", extensions: /\.jpe?g$/i, types: ["image/jpeg", "image/jpg"] };
+// `types` and `extensions` map each accepted MIME type and extension to a format;
+// a file is accepted only when both are known and name the same format.
+const PDF_RULE = { accept: "application/pdf", formats: "PDF", types: { "application/pdf": "pdf" }, extensions: { ".pdf": "pdf" } };
+const IMAGE_RULE = {
+  accept: ".jpg,.jpeg,image/jpeg,.png,image/png", formats: "JPG, JPEG or PNG",
+  types: { "image/jpeg": "jpeg", "image/jpg": "jpeg", "image/png": "png" },
+  extensions: { ".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png" },
+};
 export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 
+// Image dimension rules must match Backend/services/imageRules.js (scenarios.test.js checks).
+// `tolerancePx` is the allowed difference per dimension; 0 means an exact match.
 export const UPLOAD_FIELDS = {
   aadhar: { ...PDF_RULE, label: "Upload Aadhaar Card", section: "education", indianOnly: true },
   marksheet10: { ...PDF_RULE, label: "Upload Class-10th Marksheet", section: "education" },
   marksheet12: { ...PDF_RULE, label: "Upload Class-12th Marksheet", section: "education" },
-  photo: { ...JPEG_RULE, label: "Passport Size Photo", section: "student" },
+  photo: { ...IMAGE_RULE, label: "Passport Size Photo", section: "student", dimensionLabel: "Photo", width: 413, height: 531, tolerancePx: 0, sizeNote: "35mm x 45mm at 300 DPI" },
   passport: { ...PDF_RULE, label: "Upload Passport", section: "student", foreignOnly: true },
   dgcaExamResult: { ...PDF_RULE, label: "Upload DGCA Examination Result", section: "aviation" },
   dgcaMedicalAssessment: { ...PDF_RULE, label: "Upload DGCA Medical Assessment", section: "aviation" },
-  signature: { ...JPEG_RULE, label: "Student's Signature", section: "declaration" },
-  parentSignature: { ...JPEG_RULE, label: "Parent's Signature", section: "declaration" },
+  signature: { ...IMAGE_RULE, label: "Student's Signature", section: "declaration", dimensionLabel: "Signature", width: 300, height: 150, tolerancePx: 0 },
+  parentSignature: { ...IMAGE_RULE, label: "Parent's Signature", section: "declaration", dimensionLabel: "Parent's signature", width: 300, height: 150, tolerancePx: 0 },
 };
+
+const formatOf = (map, key) => (Object.hasOwn(map, key) ? map[key] : undefined);
 
 export function normalizeForm(saved = {}) {
   const source = saved && typeof saved === "object" ? saved : {};
@@ -93,12 +103,68 @@ export function readDraft(storage, now = Date.now()) {
 export function validateUpload(file, name) {
   const rule = UPLOAD_FIELDS[name];
   if (!rule) return "Unsupported upload field";
-  if (!rule.types.includes(file.type) || !rule.extensions.test(file.name)) {
+  const format = formatOf(rule.types, String(file.type).toLowerCase());
+  const extension = /\.[^.]+$/.exec(String(file.name).toLowerCase())?.[0];
+  if (!format || formatOf(rule.extensions, extension) !== format) {
     return `Only ${rule.formats} files are allowed`;
   }
   if (file.size > MAX_UPLOAD_BYTES) return "File size must not exceed 2 MB";
   if (file.size === 0) return "The selected file is empty";
   return "";
+}
+
+export function checkImageDimensions(width, height, rule) {
+  const tolerance = rule.tolerancePx || 0;
+  if (Math.abs(width - rule.width) <= tolerance && Math.abs(height - rule.height) <= tolerance) return { ok: true, message: "" };
+  const required = tolerance ? `${rule.width} × ${rule.height} px (±${tolerance} px)` : `exactly ${rule.width} × ${rule.height} px`;
+  return { ok: false, message: `${rule.dimensionLabel} must be ${required}. Your image is ${width} × ${height} px. Please resize it using Reduce Images.` };
+}
+
+// Browser only: the displayed size after EXIF orientation is applied.
+export async function readImageDimensions(file) {
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      const size = { width: bitmap.width, height: bitmap.height };
+      bitmap.close?.();
+      return size;
+    } catch {
+      // Fall back to an <img> decode below.
+    }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    return { width: image.naturalWidth, height: image.naturalHeight };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// Decodes an already type/size-checked image and applies its dimension rule.
+export async function validateImageUpload(file, name, readDimensions = readImageDimensions) {
+  const rule = UPLOAD_FIELDS[name];
+  if (!rule?.width) return "";
+  let size;
+  try {
+    size = await readDimensions(file);
+  } catch {
+    return `The selected image could not be read. Please upload a valid ${rule.formats} image.`;
+  }
+  return checkImageDimensions(size.width, size.height, rule).message;
+}
+
+// Re-checks every selected, visible image (used again at submit time).
+export async function validateSelectedImages(form, files, readDimensions = readImageDimensions) {
+  const errors = {};
+  for (const [name, rule] of Object.entries(UPLOAD_FIELDS)) {
+    if (!rule.width || !files[name] || !isUploadVisible(name, form)) continue;
+    const error = validateUpload(files[name], name) || await validateImageUpload(files[name], name, readDimensions);
+    if (error) errors[name] = error;
+  }
+  return errors;
 }
 
 export function isUploadVisible(name, form) {

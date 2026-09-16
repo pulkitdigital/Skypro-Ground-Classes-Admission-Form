@@ -12,7 +12,7 @@ import { CONTACT_MOBILE_FIELDS, CONTACT_PHONE_PREFIXES, sanitizeContacts, hidden
 import { sanitizeEducation, validateEducation } from "./educationModel.js";
 import { hiddenAviationFields, omitFields, sanitizeAviationForm, validateAviationWorkflow } from "./aviationWorkflowModel.js";
 import { ADDRESS_PAIRS, FOREIGN_FIELDS, synchronizeAddress, updateFormField, validateStudentDetails } from "./studentDetailsModel.js";
-import { FORM_NAME, DRAFT_VERSION, DRAFT_KEY, DRAFT_TIMESTAMP_KEY, DRAFT_TTL, UPLOAD_FIELDS, normalizeForm, readDraft, validateUpload, validateFormUploads, isUploadVisible, createSubmission } from "./formState";
+import { FORM_NAME, DRAFT_VERSION, DRAFT_KEY, DRAFT_TIMESTAMP_KEY, DRAFT_TTL, UPLOAD_FIELDS, normalizeForm, readDraft, validateUpload, validateImageUpload, validateSelectedImages, validateFormUploads, isUploadVisible, createSubmission } from "./formState";
 import { submissionFeedback } from "./submissionFeedback.js";
 
 const PRISTINE_FORM = JSON.stringify(normalizeForm());
@@ -232,21 +232,11 @@ export default function GroundSchoolForm() {
     setFileErrors((prev) => ({ ...prev, [name]: "" }));
     setValidatingFiles((prev) => ({ ...prev, [name]: false }));
     if (!file) return;
+    // Type and size first, then decode the image and check its dimensions.
     let error = validateUpload(file, name);
-    const rule = UPLOAD_FIELDS[name];
-    if (!error && rule.types.includes("image/jpeg")) {
+    if (!error && UPLOAD_FIELDS[name].width) {
       setValidatingFiles((prev) => ({ ...prev, [name]: true }));
-      const url = URL.createObjectURL(file);
-      try {
-        const img = new Image();
-        img.src = url;
-        await img.decode();
-        if (rule.width && (img.naturalWidth !== rule.width || img.naturalHeight !== rule.height)) {
-          error = rule.label + " dimensions must be exactly " + rule.width + " × " + rule.height + " pixels";
-        }
-      } catch {
-        error = "The selected image could not be read. Please upload a valid JPG or JPEG.";
-      } finally { URL.revokeObjectURL(url); }
+      error = await validateImageUpload(file, name);
     }
     if (uploadVersions.current[name] !== version) return;
     setValidatingFiles((prev) => ({ ...prev, [name]: false }));
@@ -295,8 +285,12 @@ export default function GroundSchoolForm() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (submittingRef.current) return;
+    // Held during the async image re-check so a second click cannot start another submission.
+    submittingRef.current = true;
 
     const errors = validateForm();
+    const imageErrors = await validateSelectedImages(form, files);
+    Object.entries(imageErrors).forEach(([name, error]) => { if (!errors[name]) errors[name] = error; });
     if (!disclaimerAccepted) errors.declarationAccepted = "Please accept the Declaration & Undertaking to proceed";
     const token = window.grecaptcha?.getResponse?.();
     if (!token) {
@@ -306,11 +300,11 @@ export default function GroundSchoolForm() {
     }
     const count = Object.values(errors).filter(Boolean).length;
     if (count) {
+      submittingRef.current = false;
       showErrors(errors, count === 1 ? "Please correct the highlighted field before submitting." : `Please correct the ${count} highlighted fields before submitting.`);
       return;
     }
 
-    submittingRef.current = true;
     setLoading(true);
     setStatus(EMPTY_STATUS);
 
@@ -390,7 +384,11 @@ export default function GroundSchoolForm() {
               <ul className="list-disc pl-6 space-y-2 text-gray-800 leading-relaxed">
                 <li>All documents must be uploaded in PDF format, maximum 2 MB per document.</li>
                 <li>Applicants should compress documents before uploading if necessary.</li>
-                <li>Passport-size photograph and signatures must be JPG or JPEG format only.</li>
+                <li>Passport-size photograph and signatures must be JPG, JPEG or PNG format, maximum 2 MB each.</li>
+                <li>
+                  The photo must be exactly {UPLOAD_FIELDS.photo.width} × {UPLOAD_FIELDS.photo.height} pixels ({UPLOAD_FIELDS.photo.sizeNote}); the student and parent signatures must be exactly {UPLOAD_FIELDS.signature.width} × {UPLOAD_FIELDS.signature.height} pixels. Resize images using{" "}
+                  <a href="https://www.reduceimages.com/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Reduce Images</a> if needed.
+                </li>
                 <li>Incorrect file format or files over the size limit must not be accepted.</li>
               </ul>
               <p className="mt-4 text-gray-800">

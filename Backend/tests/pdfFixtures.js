@@ -35,15 +35,30 @@ const SCENARIOS = {
       hasEgcaId: "Yes", egcaId: "EGCA-445566", hasDgcaMedical: "Yes", dgcaMedicalClass: "DGCA Class-1 Medical",
     }),
   },
+  "indian-png-images": {
+    applicationId: "SKY-GS-2026-09-0003",
+    imageFormat: "png",
+    body: validBody({ fullName: "Riya Kapoor", gender: "Female", email: "riya@example.com" }),
+  },
 };
 
-const PHOTO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="350" height="450"><rect width="350" height="450" fill="#dfe9f5"/><circle cx="175" cy="170" r="80" fill="#8aa4c4"/><path d="M45 450 C60 300 290 300 305 450 Z" fill="#8aa4c4"/></svg>`;
-const signatureSvg = curve => `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="200"><rect width="600" height="200" fill="#ffffff"/><path d="${curve}" stroke="#1b2a6b" stroke-width="6" fill="none" stroke-linecap="round"/></svg>`;
-const IMAGES = {
-  photo: PHOTO_SVG,
-  signature: signatureSvg("M30 140 C80 40 120 180 170 90 S260 60 300 130 S420 70 470 110 S560 120 580 90"),
-  parentSignature: signatureSvg("M40 120 C90 60 130 160 190 100 S300 150 350 90 S470 140 560 80"),
+// Sized to the upload rules: photo 413 × 531 px, signatures 300 × 150 px.
+const PHOTO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="413" height="531" viewBox="0 0 350 450" preserveAspectRatio="none"><rect width="350" height="450" fill="#dfe9f5"/><circle cx="175" cy="170" r="80" fill="#8aa4c4"/><path d="M45 450 C60 300 290 300 305 450 Z" fill="#8aa4c4"/></svg>`;
+// PNG signatures have a transparent background, like a scanned signature exported with alpha.
+const signatureSvg = (curve, transparent) => `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="150" viewBox="0 0 600 200" preserveAspectRatio="none">${transparent ? "" : `<rect width="600" height="200" fill="#ffffff"/>`}<path d="${curve}" stroke="#1b2a6b" stroke-width="6" fill="none" stroke-linecap="round"/></svg>`;
+const SIGNATURE_CURVES = {
+  signature: "M30 140 C80 40 120 180 170 90 S260 60 300 130 S420 70 470 110 S560 120 580 90",
+  parentSignature: "M40 120 C90 60 130 160 190 100 S300 150 350 90 S470 140 560 80",
 };
+const imageSvg = (fieldname, transparent) => fieldname === "photo" ? PHOTO_SVG : signatureSvg(SIGNATURE_CURVES[fieldname], transparent);
+const IMAGE_FIELDS = ["photo", "signature", "parentSignature"];
+
+// Renders a fixture image as JPEG (default) or PNG with the given extension and MIME type.
+async function sampleImage(fieldname, imageFormat = "jpeg") {
+  const png = imageFormat === "png";
+  const image = sharp(Buffer.from(imageSvg(fieldname, png)));
+  return { buffer: await (png ? image.png() : image.jpeg()).toBuffer(), extension: png ? ".png" : ".jpg", mimetype: png ? "image/png" : "image/jpeg" };
+}
 
 // Decodes the hex text operators PDFKit writes for standard fonts.
 function extractText(bytes) {
@@ -69,36 +84,31 @@ async function sampleDocument(fieldname) {
   return Buffer.from(await pdf.save());
 }
 
-async function writeSampleUploads(directory, body) {
+// `imageFormat: "png"` writes the photo and both signatures as PNG instead of JPEG.
+async function writeSampleUploads(directory, body, { imageFormat = "jpeg" } = {}) {
   const files = [];
   for (const { fieldname } of filesFor(body)) {
-    let buffer;
-    let extension;
-    if (IMAGES[fieldname]) {
-      buffer = await sharp(Buffer.from(IMAGES[fieldname])).jpeg().toBuffer();
-      extension = ".jpg";
-    } else {
-      buffer = await sampleDocument(fieldname);
-      extension = ".pdf";
-    }
+    const { buffer, extension, mimetype } = IMAGE_FIELDS.includes(fieldname)
+      ? await sampleImage(fieldname, imageFormat)
+      : { buffer: await sampleDocument(fieldname), extension: ".pdf", mimetype: "application/pdf" };
     const filePath = path.join(directory, fieldname + extension);
     await fs.writeFile(filePath, buffer);
-    files.push({ fieldname, originalname: fieldname + extension, mimetype: extension === ".pdf" ? "application/pdf" : "image/jpeg", path: filePath, size: buffer.length });
+    files.push({ fieldname, originalname: fieldname + extension, mimetype, path: filePath, size: buffer.length });
   }
   return files;
 }
 
 // Writes sample uploads for any request body and returns the normalized admission.
-async function admissionFromBody(body, applicationId, directory, now = new Date("2026-09-14T06:30:00Z")) {
-  const files = await writeSampleUploads(directory, body);
+async function admissionFromBody(body, applicationId, directory, { now = new Date("2026-09-14T06:30:00Z"), imageFormat } = {}) {
+  const files = await writeSampleUploads(directory, body, { imageFormat });
   const form = normalizeAdmission(body, files, now);
   form.applicationId = applicationId;
   return { form, files };
 }
 
 async function sampleAdmission(name, directory, now) {
-  const { body, applicationId } = SCENARIOS[name];
-  return admissionFromBody(body, applicationId, directory, now);
+  const { body, applicationId, imageFormat } = SCENARIOS[name];
+  return admissionFromBody(body, applicationId, directory, { now, imageFormat });
 }
 
-module.exports = { SCENARIOS, SAMPLE_DOCUMENTS, admissionFromBody, extractText, sampleAdmission, sampleDocument, writeSampleUploads };
+module.exports = { SCENARIOS, SAMPLE_DOCUMENTS, admissionFromBody, extractText, sampleAdmission, sampleDocument, sampleImage, writeSampleUploads };

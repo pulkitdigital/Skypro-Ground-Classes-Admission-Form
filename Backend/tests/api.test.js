@@ -11,7 +11,14 @@ const { validBody, filesFor } = require("./fixtures");
 
 test("multipart API validates contents, rejects bad submissions, and cleans all rejected uploads", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "skypro-api-test-"));
-  const jpeg = await sharp({ create: { width: 40, height: 20, channels: 3, background: "white" } }).jpeg().toBuffer();
+  // Images match the upload rules; the parent signature is a PNG to cover both formats.
+  const image = (width, height) => sharp({ create: { width, height, channels: 3, background: "white" } });
+  const jpeg = await image(300, 150).jpeg().toBuffer();
+  const uploads = {
+    photo: { bytes: await image(413, 531).jpeg().toBuffer(), type: "image/jpeg", name: "photo.jpg" },
+    signature: { bytes: jpeg, type: "image/jpeg", name: "signature.jpg" },
+    parentSignature: { bytes: await image(300, 150).png().toBuffer(), type: "image/png", name: "parent.PNG" },
+  };
   const pdfDoc = await PDFDocument.create(); pdfDoc.addPage();
   const pdf = await pdfDoc.save();
   const jobs = [];
@@ -27,10 +34,10 @@ test("multipart API validates contents, rejects bad submissions, and cleans all 
     const form = new FormData();
     Object.entries(body).forEach(([key, value]) => form.append(key, value));
     filesFor(body).forEach(({ fieldname }) => {
-      const image = ["photo", "signature", "parentSignature"].includes(fieldname);
-      form.append(fieldname, new Blob([image ? jpeg : pdf], { type: image ? "image/jpeg" : "application/pdf" }), image ? "image.jpg" : "document.pdf");
+      const upload = uploads[fieldname] || { bytes: pdf, type: "application/pdf", name: "document.pdf" };
+      form.append(fieldname, new Blob([upload.bytes], { type: upload.type }), upload.name);
     });
-    alter(form);
+    await alter(form);
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/submit`, { method: "POST", body: form });
     return { status: response.status, body: await response.json() };
   };
@@ -39,6 +46,7 @@ test("multipart API validates contents, rejects bad submissions, and cleans all 
     assert.equal(response.status, expected, JSON.stringify(response.body));
     assert.ok(response.body.error);
     assert.deepEqual(await fs.readdir(root), []);
+    return response.body;
   };
   await rejected(validBody({ fullName: "" }));
   assert.equal(verifyCalls, 0);
@@ -49,6 +57,9 @@ test("multipart API validates contents, rejects bad submissions, and cleans all 
   await rejected(validBody(), form => form.set("signature", new Blob(["fake"], { type: "image/jpeg" }), "signature.jpg"));
   await rejected(validBody(), form => form.set("marksheet10", new Blob(["%PDF-fake"], { type: "application/pdf" }), "document.pdf"));
   await rejected(validBody(), form => form.set("signature", new Blob([new Uint8Array(2 * 1024 * 1024 + 1)], { type: "image/jpeg" }), "signature.jpg"));
+  const wrongSize = await rejected(validBody(), async form => form.set("photo", new Blob([await image(600, 800).png().toBuffer()], { type: "image/png" }), "photo.png"));
+  assert.deepEqual(wrongSize.fields, { photo: "Photo must be exactly 413 × 531 px. Your image is 600 × 800 px. Please resize it using Reduce Images." });
+  assert.equal(verifyCalls, 0, "image rules are enforced before reCAPTCHA verification");
   await rejected(validBody(), form => form.append("fullName", "Duplicate"));
   await rejected(validBody({ recaptchaToken: "" }));
   for (const result of [{ success: false }, { success: true, score: 0 }, new Error("Verification unavailable")]) { captcha = result; await rejected(validBody()); }

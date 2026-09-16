@@ -5,16 +5,40 @@ const multer = require("multer");
 const sharp = require("sharp");
 const { PDFDocument } = require("pdf-lib");
 const { AdmissionError, FILE_FIELDS } = require("./admissionContract");
+const { IMAGE_RULES, IMAGE_TYPE_FORMATS, IMAGE_EXTENSION_FORMATS, checkImageDimensions } = require("./imageRules");
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
-const IMAGE_FIELDS = new Set(["photo", "signature", "parentSignature"]);
+const IMAGE_FIELDS = new Set(Object.keys(IMAGE_RULES));
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+const extensionOf = name => path.extname(String(name || "")).toLowerCase();
+const formatOf = (map, key) => (Object.hasOwn(map, key) ? map[key] : undefined);
+
+// Images: the MIME type and the extension must both be allowed and name the same format.
 function validateFileMetadata(file) {
   const image = IMAGE_FIELDS.has(file.fieldname);
   if (!FILE_FIELDS.includes(file.fieldname)) throw new AdmissionError("Unsupported upload field");
-  const typeOK = image ? ["image/jpeg", "image/jpg"].includes(file.mimetype) : file.mimetype === "application/pdf";
-  const extensionOK = (image ? /\.jpe?g$/i : /\.pdf$/i).test(file.originalname);
-  if (!typeOK || !extensionOK) throw new AdmissionError(`${file.fieldname}: only ${image ? "JPG/JPEG" : "PDF"} files are allowed`, { [file.fieldname]: "File type and extension must match the required format" });
+  const imageFormat = formatOf(IMAGE_TYPE_FORMATS, String(file.mimetype).toLowerCase());
+  const typeOK = image
+    ? Boolean(imageFormat) && imageFormat === formatOf(IMAGE_EXTENSION_FORMATS, extensionOf(file.originalname))
+    : file.mimetype === "application/pdf" && /\.pdf$/i.test(file.originalname);
+  if (!typeOK) throw new AdmissionError(`${file.fieldname}: only ${image ? "JPG/JPEG/PNG" : "PDF"} files are allowed`, { [file.fieldname]: "File type and extension must match the required format" });
+}
+
+const signatureFormat = buffer => buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff ? "jpeg"
+  : buffer.subarray(0, 8).equals(PNG_SIGNATURE) ? "png" : null;
+
+// Decodes the whole image; MIME declarations and extensions alone are not trustworthy.
+async function readImage(file, buffer) {
+  const format = formatOf(IMAGE_EXTENSION_FORMATS, extensionOf(file.originalname));
+  if (signatureFormat(buffer) !== format) throw new Error("Content does not match the extension");
+  const image = sharp(buffer, { limitInputPixels: 40_000_000, failOn: "warning" });
+  const metadata = await image.metadata();
+  if (metadata.format !== format) throw new Error("Decoded format does not match the extension");
+  await image.raw().toBuffer();
+  // EXIF orientations 5-8 rotate by 90 degrees, so the displayed width and height swap.
+  const rotated = metadata.orientation >= 5 && metadata.orientation <= 8;
+  return { format, width: rotated ? metadata.height : metadata.width, height: rotated ? metadata.width : metadata.height };
 }
 
 function createUpload(uploadRoot) {
@@ -50,22 +74,22 @@ async function validateFileContents(files) {
     const stat = await fs.stat(file.path);
     if (!stat.size || stat.size > MAX_UPLOAD_BYTES) throw new AdmissionError(`${file.fieldname}: upload a nonempty file no larger than 2 MB`);
     const buffer = await fs.readFile(file.path);
+    let image;
     try {
       if (IMAGE_FIELDS.has(file.fieldname)) {
-        if (buffer[0] !== 0xff || buffer[1] !== 0xd8 || buffer[2] !== 0xff) throw new Error("Not a JPEG");
-        // Decode the actual image; MIME declarations alone are not trustworthy.
-        const image = sharp(buffer, { limitInputPixels: 40_000_000, failOn: "warning" });
-        const metadata = await image.metadata();
-        if (metadata.format !== "jpeg") throw new Error("Not a JPEG");
-        await image.raw().toBuffer();
-        file.mimetype = "image/jpeg";
+        image = await readImage(file, buffer);
+        file.mimetype = image.format === "png" ? "image/png" : "image/jpeg";
       } else {
         if (!buffer.subarray(0, 8).toString("ascii").startsWith("%PDF-")) throw new Error("Not a PDF");
         const pdf = await PDFDocument.load(buffer);
         if (pdf.isEncrypted || !pdf.getPageCount()) throw new Error("Unreadable PDF");
       }
     } catch {
-      throw new AdmissionError(`${file.fieldname}: upload a valid, readable ${IMAGE_FIELDS.has(file.fieldname) ? "JPG/JPEG image" : "unencrypted PDF"}`, { [file.fieldname]: "File contents do not match a supported, readable document" });
+      throw new AdmissionError(`${file.fieldname}: upload a valid, readable ${IMAGE_FIELDS.has(file.fieldname) ? "JPG/JPEG/PNG image" : "unencrypted PDF"}`, { [file.fieldname]: "File contents do not match a supported, readable document" });
+    }
+    if (image) {
+      const { ok, message } = checkImageDimensions(image.width, image.height, IMAGE_RULES[file.fieldname]);
+      if (!ok) throw new AdmissionError(message, { [file.fieldname]: message });
     }
   }
 }
